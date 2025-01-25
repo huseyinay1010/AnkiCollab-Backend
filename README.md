@@ -15,3 +15,8 @@ Profit
 Have fun.
 If you make any cool changes, please consider creating a pull request so we can all benefit from it.
 
+---
+
+Why is this Repository so new?
+
+I used to keep the backend part private, because nobody cared for it. I decided to change that recently and hope that anybody able to self-host ankiCollab will also make improvements to it and share it with the rest of us.
