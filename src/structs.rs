@@ -201,6 +201,12 @@ pub struct CheckDeckAliveRequest {
 }
 
 #[derive(Deserialize)]
+pub struct SubscriptionRequest {
+    pub deck_hash: String,
+    pub user_hash: String,
+}
+
+#[derive(Deserialize)]
 pub struct NoteStatsInfo {
     pub retention: i32,
     pub reps: i32,

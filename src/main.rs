@@ -112,12 +112,6 @@ pub async fn check_for_update(
 
     for (deck_hash, update_info) in input.iter() {
         if update_info.timestamp == "2022-12-31 23:59:59" {
-            let ip = iip.to_string();
-            match subscription::add(&state, deck_hash.to_string(), ip).await {
-                Ok(_val) => (),
-                Err(_error) => (),
-            };
-
             // Check if the result is already cached
             let file_name = format!("{}.json", deck_hash);
             let json_data = read_cached_json(&file_name);
@@ -358,17 +352,29 @@ pub async fn check_deck_alive(
     }
 }
 
-pub async fn remove_subscription(
-    InsecureClientIp(iip): InsecureClientIp,
+pub async fn add_subscription(
     State(db_state): State<Arc<AppState>>,
-    Path(deck_hash): Path<String>,
+    Json(request): Json<structs::SubscriptionRequest>,
 ) -> impl IntoResponse {
-    let ip = iip.to_string();
-    match subscription::remove(&db_state, deck_hash, ip).await {
+    let deck_hash = request.deck_hash;
+    let user_hash = request.user_hash;
+    match subscription::add(&db_state, deck_hash, user_hash).await {
         Ok(res) => (StatusCode::OK, res),
-        Err(error) => {
-            //println!("Error occurred: {}", error);
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("Error occurred: {}", error))
+        Err(_error) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, ())
+        },
+    }
+}
+pub async fn remove_subscription(
+    State(db_state): State<Arc<AppState>>,
+    Json(request): Json<structs::SubscriptionRequest>,
+) -> impl IntoResponse {
+    let deck_hash = request.deck_hash;
+    let user_hash = request.user_hash;
+    match subscription::remove(&db_state, deck_hash, user_hash).await {
+        Ok(res) => (StatusCode::OK, res),
+        Err(_error) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, ())
         },
     }
 }
@@ -476,7 +482,7 @@ pub async fn check_user_token(
 #[tokio::main]
 async fn main() {
     // Sentry setup
-    let _guard = sentry::init(("https://<>@<>.ingest.sentry.io/<>", sentry::ClientOptions {
+    let _guard = sentry::init(("https://95f7087d2fb0ab43d5822b7ec6447ffd@o4506203821178880.ingest.sentry.io/4506203871903744", sentry::ClientOptions {
         release: sentry::release_name!(),
         traces_sample_rate: 0.2,
         ..Default::default()
@@ -521,7 +527,8 @@ async fn main() {
         .route("/createDeck", post(post_data))
         .route("/submitCard", post(process_card))
         .route("/CheckDeckAlive", post(check_deck_alive))
-        .route("/RemoveSubscription/:deck_hash", get(remove_subscription))
+        .route("/AddSubscription", post(add_subscription))
+        .route("/RemoveSubscription", post(remove_subscription))
         .route("/GetDeckTimestamp/:deck_hash", get(get_deck_timestamp))
         .route("/GetLargeDecks", get(get_large_decks))
         .route("/submitChangelog", post(submit_changelog))

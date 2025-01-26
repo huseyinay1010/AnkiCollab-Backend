@@ -163,7 +163,7 @@ pub async fn unpack_notes(client: &mut SharedConn, notes: Vec<&Note>, notetype_m
                 update_note_timestamp(&tx, id).await?; 
             }
 
-            if !note.tags.is_empty() && !tag_values.is_empty() { // Ill-formed SQL query if no tags. Shouldn't be necessary to do this check on fields because it's not possible to have a note with no fields (somehow the users make it possible tho)
+            if !note.tags.is_empty() && !tag_values.is_empty() { // Ill-formed SQL query if no tags. Shouldn't be necessary to do this check on fields because it's not possible to have a note with no fields  
                 let stmt = tx.prepare(tag_query.as_str()).await?;
                 tx.execute(&stmt, &tag_values[..]).await?;
             }
