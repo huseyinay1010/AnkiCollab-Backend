@@ -284,25 +284,10 @@ pub async fn pull_changes(
             media_files: media,
         };
 
-        let mut gdrive: GDriveInfo = Default::default();
-
-        let query_gdrive = client
-            .query(
-                "select google_data, folder_id FROM service_accounts WHERE deck = $1 LIMIT 1",
-                &[&id],
-            )
-            .await?;
-        if let Some(row) = query_gdrive.first() {
-            let cred_json: serde_json::Value = row.get("google_data");
-            gdrive.service_account = serde_json::from_value(cred_json)?;
-            gdrive.folder_id = row.get("folder_id");
-        }
-
         let mut deleted_notes = Vec::new();
         discover_deleted_notes(&client, id, &mut deleted_notes, timestamp).await?;
 
         let res = UpdateInfoResponse {
-            gdrive,
             protected_fields: nt,
             deck: daddy,
             changelog: get_changelog_info(&client, id, timestamp)
@@ -432,27 +417,4 @@ pub async fn check_deck_alive(
         .collect();
 
     Ok(missing_hashes)
-}
-
-pub async fn get_google_drive_data(
-    db_state: &Arc<database::AppState>,
-    deck_hash: String,
-) -> Result<GDriveInfo, Box<dyn std::error::Error>> {
-    let client = match db_state.db_pool.get().await {
-        Ok(pool) => pool,
-        Err(err) => {
-            println!("Error getting pool: {}", err);
-            return Err("Failed to retrieve a pooled connection".into());
-        }
-    };
-
-    let mut gdrive: GDriveInfo = Default::default();
-
-    let query_gdrive = client.query("select google_data, folder_id FROM service_accounts WHERE deck = (select id from decks where human_hash = $1)", &[&deck_hash]).await?;
-    if let Some(row) = query_gdrive.first() {
-        let cred_json: serde_json::Value = row.get("google_data");
-        gdrive.service_account = serde_json::from_value(cred_json)?;
-        gdrive.folder_id = row.get("folder_id");
-    }
-    Ok(gdrive)
 }

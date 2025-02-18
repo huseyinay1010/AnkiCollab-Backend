@@ -451,25 +451,6 @@ pub async fn submit_changelog(
     }
 }
 
-pub async fn get_gdrive_data(
-    Path(deck_hash): Path<String>,
-    State(db_state): State<Arc<AppState>>
-) -> impl IntoResponse {
-    match pull::get_google_drive_data(&db_state, deck_hash).await {
-        Ok(res) => {
-            if res.folder_id.is_empty() {
-                return (StatusCode::OK, "".to_string());
-            }
-            let json = serde_json::to_string(&res).unwrap();
-            (StatusCode::OK, json)
-        },
-        Err(error) => {
-            println!("Error occurred: {}", error);
-            (StatusCode::INTERNAL_SERVER_ERROR, "".to_string())
-        }
-    }
-}
-
 pub async fn check_user_token(
     State(db_state): State<Arc<AppState>>,
     Json(info): Json<structs::TokenInfo>
@@ -531,8 +512,7 @@ async fn main() {
         .route("/RemoveSubscription", post(remove_subscription))
         .route("/GetDeckTimestamp/:deck_hash", get(get_deck_timestamp))
         .route("/GetLargeDecks", get(get_large_decks))
-        .route("/submitChangelog", post(submit_changelog))
-        .route("/GetGDriveData/:deck_hash", get(get_gdrive_data))        
+        .route("/submitChangelog", post(submit_changelog))    
         .route("/login", post(post_login))
         .route("/removeToken/:token", get(remove_token))
         .route("/UploadDeckStats", post(upload_deck_stats))

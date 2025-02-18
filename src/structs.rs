@@ -109,48 +109,7 @@ pub struct NoteModel {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct GoogleServiceAccount {
-    pub r#type: String,
-    pub project_id: String,
-    pub private_key_id: String,
-    pub private_key: String,
-    pub client_email: String,
-    pub client_id: String,
-    pub auth_uri: String,
-    pub token_uri: String,
-    pub auth_provider_x509_cert_url: String,
-    pub client_x509_cert_url: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct GDriveInfo {
-    pub service_account: GoogleServiceAccount,
-    pub folder_id: String,
-}
-
-impl Default for GDriveInfo {
-    fn default() -> Self {
-        GDriveInfo {
-            service_account: GoogleServiceAccount {
-                r#type: String::new(),
-                project_id: String::new(),
-                private_key_id: String::new(),
-                private_key: String::new(),
-                client_email: String::new(),
-                client_id: String::new(),
-                auth_uri: String::new(),
-                token_uri: String::new(),
-                auth_provider_x509_cert_url: String::new(),
-                client_x509_cert_url: String::new(),
-            },
-            folder_id: String::new(),
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
 pub struct UpdateInfoResponse {
-    pub gdrive: GDriveInfo,
     pub protected_fields: Vec<NoteModel>,
     pub deck: AnkiDeck,
     pub changelog: String,
