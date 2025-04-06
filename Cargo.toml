@@ -7,24 +7,40 @@ edition = "2021"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-axum = "0.7.6"
-tower = { version = "0.5.0", features = ["full"] }
-tower-http = { version = "0.6.1", features = ["timeout", "trace"] }
+axum = { version = "0.8.3", features = ["multipart"] }
+axum-macros = "0.5.0"
+tower = { version = "0.5.2", features = ["full"] }
+tower-http = { version = "0.6.2", features = ["timeout", "trace"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tokio = { version = "1", features = ["full"] }
-tokio-postgres = { version = "0.7.7", features = ["with-chrono-0_4", "array-impls", "with-serde_json-1"] }
+aws-config = { version = "1.6.1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1.82.0", features = ["behavior-version-latest"] }
+tokio = { version = "1.44.1", features = ["full"] }
+tokio-postgres = { version = "0.7.13", features = ["with-chrono-0_4", "array-impls", "with-serde_json-1", "with-uuid-1"] }
 serde_json = "1"
-chrono = "0.4"
+chrono = { version = "0.4.40", features = ["serde"] }
 futures = "0.3"
 async-recursion = "1.0.0"
-flate2 = "1.0.25"
+flate2 = "1.1.1"
 base64 = "0.22.1"
-regex = "1.5.4"
-bb8-postgres = "0.8.1"
-once_cell = "1.17.1"
-sentry = "0.34.0"
-axum-client-ip = "0.6.0"
+regex = "1.11.1"
+bb8-postgres = "0.9.0"
+once_cell = "1.20.3"
+sentry = "0.36.0"
+axum-client-ip = "0.7.0"
 rust-argon2 = "2.1"
+html5ever = "*"
+ammonia = "4.0.0"
+dotenvy = "0.15.7"
+md-5 = "0.10.6"
+sha2 = "0.10.8"
+async_zip = { version = "0.0.17", features = ["full"] }
+svg-hush = "0.9.5"
+bytes = "1.10.1"
+hex = "0.4.3"
+governor = "0.9.0"
+tower_governor = { version = "0.7.0", features = ["axum"] }
+rand = "0.9.0"
+lazy_static = "1.5.0"
 
 [dependencies.uuid]
 version = "1.2.2"

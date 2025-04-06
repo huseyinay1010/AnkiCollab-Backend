@@ -12,11 +12,17 @@ pub mod changelog;
 pub mod note_removal;
 pub mod stats;
 pub mod auth;
+pub mod cleanser;
+pub mod media_manager;
+pub mod rate_limiter;
+pub mod media_reference_manager;
+pub mod media_logger;
 
-use std::{collections::HashMap, io::Read};
+use std::{collections::HashMap, env, io::Read, time::Duration};
 
 use database::AppState;
 
+use rate_limiter::RateLimiter;
 use tokio::signal;
 
 use tower_http::trace::TraceLayer;
@@ -29,7 +35,7 @@ use axum::{
     routing::{get, post, Router},
     Json,
 };
-use axum_client_ip::InsecureClientIp;
+use axum_client_ip::{InsecureClientIp, SecureClientIpSource};
 
 use std::net::SocketAddr;
 use std::fs;
@@ -40,6 +46,12 @@ use flate2::write::GzEncoder;
 use flate2::read::GzDecoder;
 use std::io::Write;
 use base64::{Engine as _, engine::general_purpose};
+
+use tower_governor::{governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer};
+
+use aws_sdk_s3::Client as S3Client;
+
+use axum_macros::debug_handler;
 
 fn read_cached_json(file_name: &str) -> Option<String> {
     let path = format!("/home/cached_files/{}", file_name);
@@ -60,12 +72,17 @@ fn decompress_data(engine: &general_purpose::GeneralPurpose, data: &str) -> Stri
 async fn post_login(
     State(db_state): State<Arc<AppState>>,
     form: axum::Form<auth::Login>
-) -> String {
-    let status: String = match auth::login(&db_state, &form).await {
-        Ok(token) => token,
-        Err(err) => err.to_string()
-    };
-    status
+) -> impl IntoResponse {
+    match auth::login(&db_state, &form).await {
+        Ok(res) => {
+            let json = serde_json::to_string(&res).unwrap();
+            (StatusCode::OK, json)
+        },
+        Err(error) => {
+            println!("Error occurred: {}", error);
+            (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+        },
+    }
 }
 
 pub async fn remove_token(
@@ -103,8 +120,23 @@ pub async fn upload_deck_stats(
     (StatusCode::OK, "Thanks for sharing!".to_string())
 }
 
+pub async fn confirm_media_bulk_async(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<structs::MediaBulkConfirmRequest>,
+) -> impl IntoResponse {
+    // we handle the confirmation in a seperate thread, so the user doesn't have to wait for it to finish, lacking information on which files failed to upload, trading off speed for user experience
+    let state_copy = state.clone();
+    tokio::spawn(async move {
+        match media_manager::confirm_media_bulk_upload(state_copy, req).await {
+            Ok(_) => {},
+            Err(error) => { println!("Error confirming media bulk upload: {:?}", error); },
+        }
+    });
+    (StatusCode::OK, "Thanks for sharing!".to_string())
+}
+
 pub async fn check_for_update(
-    InsecureClientIp(iip): InsecureClientIp,
+    InsecureClientIp(_iip): InsecureClientIp,
     State(state): State<Arc<AppState>>,
     Json(input): Json<HashMap<String, structs::UpdateInfo>>,
 ) -> impl IntoResponse {
@@ -170,7 +202,7 @@ pub async fn post_data(
         Ok(val) => val,
         Err(error) => {
             println!("Error: {}", error);
-            return (StatusCode::OK, format!(r#"{{ "status": 0, "message": "{}" }}"#, error));
+            return (StatusCode::OK, r#"{ "status": 0, "message": "An error occurred processing your request" }"#.to_string());
         }
     };
 
@@ -184,7 +216,7 @@ pub async fn post_data(
 
     let deck_status = match push::check_deck_exists(&client, &anki_deck.name, &anki_deck.crowdanki_uuid, owner_id, None).await {
         Ok(res) => format!(r#"{{ "status": 1, "message": "{}" }}"#, res),
-        Err(error) => format!(r#"{{ "status": 0, "message": "{}" }}"#, error),
+        Err(error) => r#"{ "status": 0, "message": "Deck does not exist" }"#.to_string(),
     };
 
     
@@ -198,7 +230,7 @@ pub async fn post_data(
             }
             Err(error) => {
                 println!("Error: {}", error);
-                format!(r#"{{ "status": 0, "message": "{}" }}"#, error)
+                r#"{ "status": 0, "message": "An error occurred processing your request" }"#.to_string()
             }
         }
     });
@@ -215,24 +247,25 @@ pub async fn request_removal(
 
     let ip = iip.to_string();
 
-    let access_token = (suggestion::is_valid_user_token(&db_state, &info.token, &info.remote_deck).await).unwrap_or_default();
+    let access_token = (auth::is_valid_user_token(&db_state, &info.token, &info.remote_deck).await).unwrap_or_default();
 
     let mut force_overwrite = false;
     if access_token {
         force_overwrite = info.force_overwrite;
     }
 
-    let committing_user:Option<i32> = match suggestion::get_user_from_token(&db_state, &info.token).await {
+    let committing_user:Option<i32> = match auth::get_user_from_token(&db_state, &info.token).await {
         Ok(user) => Some(user),
         Err(_error) => None,
     };
 
     match note_removal::new(&db_state, info.note_guids, info.commit_text, info.remote_deck, ip, force_overwrite, committing_user).await {
         Ok(_res) => (StatusCode::OK, "Success".to_string()),
-        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Error occurred: {}", error)),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, "Could not create removal request.".to_string()),
     }
 }
 
+#[debug_handler]
 pub async fn process_card(
     InsecureClientIp(iip): InsecureClientIp,    
     State(state): State<Arc<AppState>>,
@@ -251,18 +284,18 @@ pub async fn process_card(
 
     let ip = iip.to_string();
     
-    let committing_user:Option<i32> = match suggestion::get_user_from_token(&state, &info.token).await {
+    let committing_user:Option<i32> = match auth::get_user_from_token(&state, &info.token).await {
         Ok(user) => Some(user),
         Err(_error) => None,
     };
     
     let commit_id = match suggestion::create_new_commit(&state, info.rationale, &info.commit_text, &ip, committing_user).await {
         Ok(val) => val,
-        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Error occurred: {}", error)),
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Error occurred. Damn!".to_string()),
     };
 
     // Check if they are authorized to decide whether they want to force overwrite or not
-    let access_token = (suggestion::is_valid_user_token(&state, &info.token, &info.remote_deck).await).unwrap_or_default();
+    let access_token = (auth::is_valid_user_token(&state, &info.token, &info.remote_deck).await).unwrap_or_default();
 
     let mut force_overwrite = false;
     if access_token {
@@ -271,7 +304,7 @@ pub async fn process_card(
 
     let deck_path = match suggestion::fix_deck_name(&state, &info.deck_path, &info.new_name, &info.remote_deck).await {
         Ok(val) => val,
-        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Error occurred: {}", error)),
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, "Invalid Deck Name".to_string()),
     };
 
     for deck in &mut anki_deck.children {
@@ -293,44 +326,46 @@ pub async fn process_card(
         Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Notetype Error: {}", error)),
     };
 
-    match suggestion::sanity_check(&client, &info.remote_deck, &deck_path, commit_id).await {
-        Ok((deck_id, owner)) => {
-            tokio::spawn(async move {
-                let deck_tree = {
-                    client.query(
-                        "
-                        WITH RECURSIVE up_tree AS (
-                            SELECT id, parent
-                            FROM decks
-                            WHERE id = $1
-                            UNION ALL
-                            SELECT d.id, d.parent
-                            FROM decks d
-                            JOIN up_tree ut ON d.id = ut.parent
-                        ),
-                        down_tree AS (
-                            SELECT id, parent
-                            FROM up_tree
-                            WHERE parent IS NULL
-                            UNION ALL
-                            SELECT d.id, d.parent
-                            FROM decks d
-                            JOIN down_tree dt ON d.parent = dt.id
-                        )
-                        SELECT DISTINCT id
-                        FROM down_tree
-                        ",
-                        &[&deck_id.unwrap()]
-                    ).await.unwrap().iter().map(|row| row.get::<_, i64>(0)).collect::<Vec<i64>>()
-                };
-                match suggestion::make(&mut client, &info.remote_deck, &mut notetype_cache, &deck_path, &anki_deck, &ip, commit_id, force_overwrite, deck_id, owner, &deck_tree).await {
-                    Ok(_res) => {},
-                    Err(error) => { println!("Error occurred in make suggestion: {}", error); },
-                }
-            });
-            (StatusCode::OK, "Success".to_string())
+    let (deck_id, owner) = match suggestion::sanity_check(&client, &info.remote_deck, &deck_path, commit_id).await {
+        Ok((deck_id, owner)) => (deck_id, owner),
+        Err(error) => {
+            println!("Error getting pool: {}", error);
+            return (StatusCode::INTERNAL_SERVER_ERROR, r#"{ "status": 0, "message": "Error submitting your suggestion" }"#.to_string());
         },
-        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Error occurred: {}", error)),
+    };
+    let deck_tree = {
+        client.query(
+            "
+            WITH RECURSIVE up_tree AS (
+                SELECT id, parent
+                FROM decks
+                WHERE id = $1
+                UNION ALL
+                SELECT d.id, d.parent
+                FROM decks d
+                JOIN up_tree ut ON d.id = ut.parent
+            ),
+            down_tree AS (
+                SELECT id, parent
+                FROM up_tree
+                WHERE parent IS NULL
+                UNION ALL
+                SELECT d.id, d.parent
+                FROM decks d
+                JOIN down_tree dt ON d.parent = dt.id
+            )
+            SELECT DISTINCT id
+            FROM down_tree
+            ",
+            &[&deck_id.unwrap()]
+        ).await.unwrap().iter().map(|row| row.get::<_, i64>(0)).collect::<Vec<i64>>()
+    };
+    match suggestion::make(&mut client, &info.remote_deck, &mut notetype_cache, &deck_path, &anki_deck, &ip, commit_id, force_overwrite, deck_id, owner, &deck_tree).await {
+        Ok(_res) => (StatusCode::OK, "Success".to_string()),
+        Err(error) => { 
+            println!("Error occurred in make suggestion: {}", error); 
+            (StatusCode::INTERNAL_SERVER_ERROR, r#"{ "status": 0, "message": "Error submitting your suggestion" }"#.to_string())
+        },
     }
 }
 
@@ -440,14 +475,14 @@ pub async fn submit_changelog(
     Json(changelog_data): Json<structs::SubmitChangelog>,
 ) -> impl IntoResponse {
     // check if they are authorized to add a changelog message to this deck
-    let access_token = (suggestion::is_valid_user_token(&db_state, &changelog_data.token, &changelog_data.deck_hash).await).unwrap_or_default();
+    let access_token = (auth::is_valid_user_token(&db_state, &changelog_data.token, &changelog_data.deck_hash).await).unwrap_or_default();
     if !access_token {
         return (StatusCode::UNAUTHORIZED, "You are not authorized to add a changelog message to this deck".to_string());
     }
 
     match changelog::insert_new_changelog(&db_state, &changelog_data.deck_hash, &changelog_data.changelog).await {
         Ok(_res) => (StatusCode::OK, "Changelog published successfully!".to_string()),
-        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, format!("An error occurred while publishing the changelog: {}", error)),
+        Err(_error) => (StatusCode::INTERNAL_SERVER_ERROR, "An error occurred while publishing the changelog.".to_string()),
     }
 }
 
@@ -455,25 +490,179 @@ pub async fn check_user_token(
     State(db_state): State<Arc<AppState>>,
     Json(info): Json<structs::TokenInfo>
 ) -> impl IntoResponse {
-    let quer = suggestion::get_user_from_token(&db_state, &info.token).await.unwrap_or_default();
+    let quer = auth::get_user_from_token(&db_state, &info.token).await.unwrap_or_default();
     let res = quer > 0;
     (StatusCode::OK, serde_json::to_string(&res).unwrap())
 }
 
+pub async fn refresh_auth_token(
+    State(db_state): State<Arc<AppState>>,
+    Json(refresh_req): Json<auth::TokenRefresh>,
+) -> impl IntoResponse {
+    match auth::refresh_token(&db_state, &refresh_req).await {
+        Ok(res) => {
+            let json = serde_json::to_string(&res).unwrap();
+            (StatusCode::OK, json)
+        },
+        Err(error) => {
+            println!("Error occurred: {}", error);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Error".to_string())
+        },
+    }
+}
+
+async fn get_protected_fields_from_deck(
+    State(db_state): State<Arc<AppState>>,
+    Path(deck_hash): Path<String>,
+) -> impl IntoResponse {
+    let client = db_state.db_pool.get_owned().await.map_err(|e| {
+        println!("Error getting pool: {}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Error".to_string())
+    }).unwrap();
+    let quer = notetypes::pull_protected_fields(&client, &deck_hash).await.unwrap_or_default();
+    (StatusCode::OK, serde_json::to_string(&quer).unwrap())
+}
+
+fn media_routes() -> Router<Arc<AppState>> {
+    let media_api_ratelimit:u32 = std::env::var("MEDIA_API_RATE_LIMIT_PER_MINUTE").expect("MEDIA_API_RATE_LIMIT_PER_MINUTE must be set").parse().expect("Rate limit must be a valid number");
+    let media_governor_conf = Arc::new(GovernorConfigBuilder::default()
+        .per_second((media_api_ratelimit as f64 / 60.0) as u64)
+        .burst_size(media_api_ratelimit / 2)
+        .key_extractor(SmartIpKeyExtractor)
+        .finish()
+        .unwrap());
+
+    let governor_limiter = media_governor_conf.limiter().clone();
+    let interval = Duration::from_secs(60);
+    // a separate background task to clean up
+    std::thread::spawn(move || loop {
+        std::thread::sleep(interval);
+        governor_limiter.retain_recent();
+    });
+
+    Router::new()
+        .route("/check/bulk", post(media_manager::check_media_bulk))
+        .route("/confirm/bulk", post(confirm_media_bulk_async))
+        .route("/manifest", post(media_manager::get_media_manifest))
+        .route("/sanitize/svg", post(media_manager::sanitize_svg_batch))        
+        // strict rate limiting
+        .layer(GovernorLayer {
+            config: media_governor_conf,
+        })
+}
+
+async fn get_bucket_size(s3_client: &S3Client, bucket: &str) -> i64 {
+    let mut pages = s3_client
+        .list_objects_v2()
+        .bucket(bucket)
+        .into_paginator()
+        .send();
+    let mut total_bytes: i64 = 0;
+
+    while let Some(page) = pages.next().await {
+        if page.is_err() {
+            println!("Error listing objects: {:?}", page.err().unwrap());
+            return 0;
+        }
+        total_bytes += page.unwrap()
+            .contents()            
+            .iter()
+            .map(|obj| obj.size.unwrap_or_default())
+            .sum::<i64>();
+    }
+    println!("Total bucket size in GB: {} GB", total_bytes / 1024 / 1024 / 1024);
+
+    total_bytes
+}
+
+
 #[tokio::main]
 async fn main() {
+    dotenvy::dotenv().expect(
+        "Expected .env file in the root directory containing the database connection string",
+    );
     // Sentry setup
-    let _guard = sentry::init(("https://95f7087d2fb0ab43d5822b7ec6447ffd@o4506203821178880.ingest.sentry.io/4506203871903744", sentry::ClientOptions {
+    let _guard = sentry::init((env::var("SENTRY_URL").expect("SENTRY_URL must be set"), sentry::ClientOptions {
         release: sentry::release_name!(),
         traces_sample_rate: 0.2,
         ..Default::default()
       }));
 
+    let s3_access_key_id = std::env::var("S3_ACCESS_KEY_ID").expect("S3_ACCESS_KEY_ID must be set");
+    let s3_secret_access_key = std::env::var("S3_SECRET_ACCESS_KEY").expect("S3_SECRET_ACCESS_KEY must be set");
+    let s3_domain = std::env::var("S3_DOMAIN").expect("S3_DOMAIN must be set");
+    let bucket_name = std::env::var("S3_BUCKET_NAME").expect("S3_BUCKET_NAME must be set");
+
+    let credentials = aws_sdk_s3::config::Credentials::new(
+        s3_access_key_id,
+        s3_secret_access_key,
+        None, None, "s3-credentials");
+    
+    let region_provider = aws_config::meta::region::RegionProviderChain::default_provider().or_else("eu-central-1"); // Europe (Frankfurt)
+    let s3_config = aws_config::from_env()
+        .region(region_provider)
+        .credentials_provider(aws_sdk_s3::config::SharedCredentialsProvider::new(credentials))
+        .endpoint_url(&s3_domain)
+        .load()
+        .await;
+    
+    let s3_service_config = aws_sdk_s3::config::Builder::from(&s3_config)
+    .force_path_style(true) // Contabo is <special>
+    .build();
+    
+    let s3_client = S3Client::from_conf(s3_service_config);
+
     let pool = database::establish_pool_connection().await.expect("Failed to establish database connection pool");
     
+    // Initialize rate limiter
+    // Get current bucket size of bucket bucket_name
+    let bucket_size = get_bucket_size(&s3_client, &bucket_name).await;
+    
+    let rate_limiter = RateLimiter::new(Arc::new(pool.clone()), bucket_size as u64);
+    rate_limiter.load_user_quotas().await.expect("Failed to load user quotas");
+
     let state = Arc::new(database::AppState {
         db_pool: Arc::new(pool),
         base64_engine: Arc::new(general_purpose::STANDARD),
+        s3_client,
+        rate_limiter,
+    });
+
+    // IP RAte limiter 
+    let global_api_ratelimit:u32 = std::env::var("STANDARD_API_RATE_LIMIT_PER_MINUTE").expect("STANDARD_API_RATE_LIMIT_PER_MINUTE must be set").parse().expect("Rate limit must be a valid number");
+    let global_governor_conf = Arc::new(GovernorConfigBuilder::default()
+            .per_second((global_api_ratelimit as f64 / 60.0) as u64)
+            .burst_size(global_api_ratelimit / 2)
+            .key_extractor(SmartIpKeyExtractor)
+            .finish()
+            .unwrap());
+
+    let governor_limiter = global_governor_conf.limiter().clone();
+    let interval = Duration::from_secs(60);
+    // a separate background task to clean up
+    std::thread::spawn(move || loop {
+        std::thread::sleep(interval);
+        governor_limiter.retain_recent();
+    });
+    
+    // start media cleanup task
+    media_manager::start_cleanup_task(state.clone()).await;
+   
+   // Schedule periodic cleanup of expired tokens
+    let cleanup_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(86400)); // Daily
+        loop {
+            interval.tick().await;
+            match auth::cleanup_expired_tokens(&cleanup_state).await {
+                Ok(count) => {
+                    if count > 0 {
+                        println!("Cleaned up {} expired tokens", count);
+                    }
+                },
+                Err(e) => println!("Error cleaning up tokens: {}", e),
+            }
+        }
     });
 
     // Enable tracing.
@@ -510,22 +699,30 @@ async fn main() {
         .route("/CheckDeckAlive", post(check_deck_alive))
         .route("/AddSubscription", post(add_subscription))
         .route("/RemoveSubscription", post(remove_subscription))
-        .route("/GetDeckTimestamp/:deck_hash", get(get_deck_timestamp))
+        .route("/GetDeckTimestamp/{deck_hash}", get(get_deck_timestamp))
         .route("/GetLargeDecks", get(get_large_decks))
         .route("/submitChangelog", post(submit_changelog))    
         .route("/login", post(post_login))
-        .route("/removeToken/:token", get(remove_token))
+        .route("/removeToken/{token}", get(remove_token))
         .route("/UploadDeckStats", post(upload_deck_stats))
         .route("/requestRemoval", post(request_removal))
         .route("/CheckUserToken", post(check_user_token))
+        .route("/refreshToken", post(refresh_auth_token))
+        .route("/GetProtectedFields/{deck_hash}", get(get_protected_fields_from_deck))
+        .nest("/media", media_routes())
+        // standard rate limiting
+        .layer(GovernorLayer {
+            config: global_governor_conf,
+        })
         .with_state(state)
-       // .layer(axum::extract::DefaultBodyLimit::disable())
+        //.layer(axum::extract::DefaultBodyLimit::disable())
         .layer((
             TraceLayer::new_for_http(),
             // Graceful shutdown will wait for outstanding requests to complete. Add a timeout so
             // requests don't hang forever. Causes issues for streaming large decks that take more than 10secs to generate. hence i disabled it
             //TimeoutLayer::new(Duration::from_secs(10)),
-        ));
+        ))
+        .layer(SecureClientIpSource::ConnectInfo.into_extension());
 
     // run it
     let listener = tokio::net::TcpListener::bind("localhost:5555").await.unwrap();

@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::fmt::Write;
 
 use crate::database;
-use crate::media::*;
 use crate::notetypes::*;
 use crate::structs::*;
 use async_recursion::async_recursion;
@@ -35,7 +34,6 @@ async fn fill_deck(
         let note_vec = (get_changed_notes(client, id, timestamp).await).unwrap_or_default();
         let children = fill_deck(client, id, timestamp).await?;
         let notetypes = get_notetypes(client, &note_vec, owner).await;
-        let media = get_media_files(client, id).await?;
 
         decks.push(AnkiDeck {
             crowdanki_uuid,
@@ -44,7 +42,6 @@ async fn fill_deck(
             name,
             note_models: Some(notetypes),
             notes: note_vec,
-            media_files: media,
         });
     }
 
@@ -270,7 +267,6 @@ pub async fn pull_changes(
         let crowdanki_uuid: String = row.get("crowdanki_uuid");
         let stats_enabled: bool = row.get("stats_enabled");
         let note_models = Some(get_notetypes(&client, &note_vec, row.get("owner")).await);
-        let media = get_media_files(&client, id).await?;
         let children = fill_deck(&client, id, timestamp).await?;
         let optional_tags = get_optional_tag_groups(&client, id).await?;
 
@@ -281,7 +277,6 @@ pub async fn pull_changes(
             name,
             note_models,
             notes: note_vec,
-            media_files: media,
         };
 
         let mut deleted_notes = Vec::new();

@@ -2,11 +2,13 @@
 
 use std::sync::Arc;
 
+use crate::cleanser;
 use crate::{database, suggestion};
 
 pub async fn new(db_state: &Arc<database::AppState>,  guids: Vec<String>, commit_text: String, deck_hash: String, ip: String, _force_overwrite: bool, user_id: Option<i32>) -> Result<(), Box<dyn std::error::Error>> { 
     
-    let commit_id = suggestion::create_new_commit(db_state, 11, &commit_text, &ip, user_id).await?; // 11 = Card Deletion
+    let strg = cleanser::clean(&commit_text);
+    let commit_id = suggestion::create_new_commit(db_state, 11, &strg, &ip, user_id).await?; // 11 = Card Deletion
     
     let mut client = match db_state.db_pool.get().await {
         Ok(pool) => pool,

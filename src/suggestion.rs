@@ -1,13 +1,12 @@
 
 use std::collections::HashMap;
 
-
-
-
 use crate::database;
+use crate::media_reference_manager::update_media_references_for_note;
 use crate::push;
 use crate::structs::*;
 use crate::notetypes::*;
+use crate::cleanser;
 
 use async_recursion::async_recursion;
 use regex::Regex;
@@ -74,62 +73,6 @@ pub async fn update_note_timestamp(tx: &tokio_postgres::Transaction<'_>, note_id
     tx.query(query2, &[&note_id]).await?;
 
     Ok(())
-}
-
-pub async fn get_user_from_token(db_state: &Arc<database::AppState>, token: &String) -> Result<i32, Box<dyn std::error::Error>> {
-    let client = match db_state.db_pool.get().await {
-        Ok(pool) => pool,
-        Err(err) => {
-            println!("Error getting pool: {}", err);
-            return Err("Failed to retrieve a pooled connection".into());
-        },
-    };
-    let rows = client.query("SELECT user_id FROM auth_tokens WHERE token = $1", &[&token]).await?;
-    if rows.is_empty() {
-        Err("Token not found".into())
-    } else {
-        Ok(rows[0].get(0))
-    }
-}
-
-pub async fn is_valid_user_token(db_state: &Arc<database::AppState>, token: &String, deck: &String) -> Result<bool, Box<dyn std::error::Error>> {
-    let client = match db_state.db_pool.get().await {
-        Ok(pool) => pool,
-        Err(err) => {
-            println!("Error getting pool: {}", err);
-            return Err("Failed to retrieve a pooled connection".into());
-        },
-    };
-    
-    let rows = client.query("    
-        WITH RECURSIVE deck_ancestors AS (
-            SELECT id, parent, owner
-            FROM decks
-            WHERE human_hash = $2
-            UNION
-            SELECT d.id, d.parent, d.owner
-            FROM decks d
-            INNER JOIN deck_ancestors da ON da.parent = d.id
-        ), user_from_token AS (
-            SELECT user_id
-            FROM auth_tokens
-            WHERE token = $1
-        )
-        SELECT access
-        FROM (
-            SELECT 1 AS access
-            FROM decks d
-            INNER JOIN deck_ancestors da ON da.id = d.id
-            INNER JOIN user_from_token uft ON (d.owner = uft.user_id OR EXISTS (SELECT 1 FROM maintainers m WHERE m.deck = d.id AND m.user_id = uft.user_id))
-            UNION
-            SELECT 1 AS access
-            FROM maintainers m
-            INNER JOIN deck_ancestors da ON da.id = m.deck
-            INNER JOIN user_from_token uft ON m.user_id = uft.user_id
-        ) AS access_subquery      
-    ", &[&token, &deck]).await?;
-    
-    Ok(!rows.is_empty())
 }
 
 pub async fn is_valid_optional_tag(tx: &tokio_postgres::Transaction<'_>, deck: &i64, tag: &str) -> std::result::Result<bool, Box<dyn std::error::Error>> {
@@ -203,11 +146,13 @@ async fn force_overwrite_tag(client: &mut SharedConn, note_id: i64, new_content:
         if tag.starts_with("AnkiCollab_Optional::") && !is_valid_optional_tag(&tx, &deck_id, tag).await?  {
             continue; // Invalid Optional tag!
         }
-        tx.execute(&insert_new_tag, &[&note_id, &tag, &reviewed, &req_ip, &commit],).await?;        
+        let con = cleanser::clean(tag);
+        tx.execute(&insert_new_tag, &[&note_id, &con, &reviewed, &req_ip, &commit],).await?;        
     }
     
     for tag in removed_tags {
-        tx.execute(&remove_new_tag, &[&note_id, &tag],).await?;        
+        let con = cleanser::clean(&tag);
+        tx.execute(&remove_new_tag, &[&note_id, &con],).await?;        
     }
 
     tx.commit().await?;
@@ -244,11 +189,13 @@ async fn check_tag(client: &mut SharedConn, note_id: i64, new_content: &[String]
         if tag.starts_with("AnkiCollab_Optional::") && !is_valid_optional_tag(&tx, &deck_id, tag).await?  {
             continue; // Invalid Optional tag!
         }
-        tx.execute(&insert_new_tag, &[&note_id, &tag, &req_ip, &commit],).await?;        
+        let con = cleanser::clean(tag);
+        tx.execute(&insert_new_tag, &[&note_id, &con, &req_ip, &commit],).await?;        
     }
     
     for tag in removed_tags {
-        tx.execute(&remove_new_tag, &[&note_id, &tag, &req_ip, &commit],).await?;        
+        let con = cleanser::clean(&tag);
+        tx.execute(&remove_new_tag, &[&note_id, &con, &req_ip, &commit],).await?;        
     }
 
     tx.commit().await?;
@@ -299,8 +246,9 @@ pub async fn overwrite_note(
     for (i, field) in note.fields.iter().enumerate().map(|(i, field)| (i as u32, field)) {
         if field.is_empty() {
             tx.execute(&delete_field_q, &[&n_id, &i],).await?;        
-        } else {
-            tx.execute(&upsert_field_q, &[&n_id, &i, &field, &req_ip, &commit],).await?;        
+        } else {            
+            let content = cleanser::clean(field);
+            tx.execute(&upsert_field_q, &[&n_id, &i, &content, &req_ip, &commit],).await?;        
         }
     }
 
@@ -312,6 +260,9 @@ pub async fn overwrite_note(
     update_note_timestamp(&tx, n_id).await?;
 
     tx.commit().await?;
+
+    // update media references
+    update_media_references_for_note(client, n_id).await?;
     
     // force tag changes
     force_overwrite_tag(client, n_id, &note.tags, req_ip, commit, true).await?;
@@ -354,7 +305,8 @@ pub async fn update_note(
     if note_reviewed {    
         for (i, field) in note.fields.iter().enumerate().map(|(i, field)| (i as u32, field)) {
             if !field.is_empty() || !tx.query("SELECT 1 FROM fields WHERE note = $1 AND position = $2", &[&n_id, &i]).await?.is_empty() {
-                tx.execute(&add_field_q, &[&n_id, &i, &field, &req_ip, &commit],).await?;
+                let content = cleanser::clean(field);
+                tx.execute(&add_field_q, &[&n_id, &i, &content, &req_ip, &commit],).await?;
             }
         }
     } else {
@@ -372,10 +324,11 @@ pub async fn update_note(
                 tx.execute(&delete_field_q, &[&n_id, &i],).await?;        
             } else {
                 let rows = tx.query(&does_field_exist, &[&n_id, &i]).await?;
+                let content = cleanser::clean(field);
                 if rows.is_empty() {
-                    tx.execute(&add_field_q, &[&n_id, &i, &field, &req_ip, &commit],).await?;
+                    tx.execute(&add_field_q, &[&n_id, &i, &content, &req_ip, &commit],).await?;
                 } else {
-                    tx.execute(&update_field_q, &[&n_id, &i, &field, &req_ip, &commit],).await?;
+                    tx.execute(&update_field_q, &[&n_id, &i, &content, &req_ip, &commit],).await?;
                 }
             }
         }
@@ -515,7 +468,7 @@ pub async fn fix_deck_name(db_state: &Arc<database::AppState>, raw_deck_path: &s
     Ok(res.replacen(alternate_name, &original_name, 1))
 }
 
-pub async fn create_new_commit(db_state: &Arc<database::AppState>, rationale: i32, commit_text: &String, ip: &String, user_id: Option<i32>) -> Result<i32, Box<dyn std::error::Error>> {
+pub async fn create_new_commit(db_state: &Arc<database::AppState>, rationale: i32, commit_text: &str, ip: &String, user_id: Option<i32>) -> Result<i32, Box<dyn std::error::Error>> {
     let client = match db_state.db_pool.get().await {
         Ok(pool) => pool,
         Err(err) => {
@@ -523,8 +476,8 @@ pub async fn create_new_commit(db_state: &Arc<database::AppState>, rationale: i3
             return Err("Failed to retrieve a pooled connection".into());
         },
     };
-
-    let rows = client.query("INSERT INTO commits (rationale, info, ip, timestamp, user_id) VALUES ($1, $2, $3, NOW(), $4) RETURNING commit_id", &[&rationale, &commit_text, &ip, &user_id]).await?;
+    let content = ammonia::clean(commit_text);
+    let rows = client.query("INSERT INTO commits (rationale, info, ip, timestamp, user_id) VALUES ($1, $2, $3, NOW(), $4) RETURNING commit_id", &[&rationale, &content, &ip, &user_id]).await?;
     Ok(rows[0].get(0))
 }
 

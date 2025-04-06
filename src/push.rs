@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::structs::*;
 use crate::notetypes::*;
-use crate::media::*;
 use crate::suggestion::*;
+use crate::cleanser;
 
 use std::collections::HashMap;
 
@@ -42,17 +42,8 @@ pub async fn unpack_notes(client: &mut SharedConn, notes: Vec<&Note>, notetype_m
         }
     }
 
-    let batch = notes.len() > 5000;
     let batch_size = 250;
     let notes_batches = notes.chunks(batch_size);
-
-    if batch {
-        client.batch_execute("
-            ALTER TABLE notes DISABLE TRIGGER ALL;
-            ALTER TABLE fields DISABLE TRIGGER ALL;
-            ALTER TABLE tags DISABLE TRIGGER ALL;
-        ").await?;
-    }
 
     let _empty_string = String::new();
 
@@ -74,6 +65,11 @@ pub async fn unpack_notes(client: &mut SharedConn, notes: Vec<&Note>, notetype_m
                 Some(guid) => guid,
                 None => return Err(format!("Note type not found in cache: {}", note.note_model_uuid).into()),
             };
+
+            if note.fields.is_empty() {
+                return Err(format!("Error inserting note {}: note has no fields", &note.guid).into());
+            }
+
             let rows = tx.query(&insert_note_stmt, &[
                 &note.guid,
                 &deck,
@@ -114,29 +110,36 @@ pub async fn unpack_notes(client: &mut SharedConn, notes: Vec<&Note>, notetype_m
 
             let indices: Vec<u32> = (0..=max_allowed_position).collect(); // Ugly, but done to avoid the temporary variable issue. #fixlater
 
+            let cleaned_fields: Vec<String> = truncated_fields.iter()
+                .map(|field| cleanser::clean(field).to_string())
+                .collect();
+
+            // Pre-clean tags
+            let cleaned_tags: Vec<String> = note.tags.iter()
+                .map(|tag| cleanser::clean(tag).to_string())
+                .collect();
+
             // i = position of the field
             // n = parameter counter for the bulk insert
             // should fix this and make it more readable later. 
             let mut n = 0;
-            for (i, field) in truncated_fields.iter().enumerate() {
-                let content = if protected_fields.contains(&(i as u32)) || field.is_empty() {
+            for (i, field) in cleaned_fields.iter().enumerate() {
+                if protected_fields.contains(&(i as u32)) || field.is_empty() {
                     continue;
-                } else {
-                    field
-                };
+                }
 
                 field_query.push_str(&format!("(${}, ${}, ${}, ${}, ${}, ${}),", 6*n+1, 6*n+2, 6*n+3, 6*n+4, 6*n+5, 6*n+6));
 
                 field_values.push(&id);
                 field_values.push(&(indices[i]));
-                field_values.push(content);
+                field_values.push(field);
                 field_values.push(&reviewed);
                 field_values.push(&req_ip);
                 field_values.push(&commit);
                 n += 1;
             }
 
-            for (i, tag) in note.tags.iter().enumerate() {
+            for (i, tag) in cleaned_tags.iter().enumerate() {
                 if tag.starts_with("AnkiCollab_Optional::") && !is_valid_optional_tag(&tx, &deck_id, tag).await?  {
                     continue; // Invalid Optional tag!
                 }
@@ -154,31 +157,27 @@ pub async fn unpack_notes(client: &mut SharedConn, notes: Vec<&Note>, notetype_m
             tag_query.pop();
             field_query.pop();
 
-            if !truncated_fields.is_empty() && !field_values.is_empty() {
+            if !cleaned_fields.is_empty() && !field_values.is_empty() {
                 let stmt2 = tx.prepare(field_query.as_str()).await?;
                 tx.execute(&stmt2, &field_values[..]).await?;
-            }           
-
-            if reviewed {
-                update_note_timestamp(&tx, id).await?; 
+            } else {
+                // If the note has no fields, remove it altogether
+                tx.execute("DELETE FROM notes WHERE id = $1", &[&id]).await?;
+                continue;
             }
 
             if !note.tags.is_empty() && !tag_values.is_empty() { // Ill-formed SQL query if no tags. Shouldn't be necessary to do this check on fields because it's not possible to have a note with no fields  
                 let stmt = tx.prepare(tag_query.as_str()).await?;
                 tx.execute(&stmt, &tag_values[..]).await?;
             }
+
+            if reviewed {
+                update_note_timestamp(&tx, id).await?; 
+            }
         }
         
         tx.commit().await?;
     } 
-
-    if batch {
-        client.batch_execute("
-            ALTER TABLE notes ENABLE TRIGGER ALL;
-            ALTER TABLE fields ENABLE TRIGGER ALL;
-            ALTER TABLE tags ENABLE TRIGGER ALL;
-        ").await?;
-    }
 
     Ok("Success".to_string())
 }
@@ -254,7 +253,7 @@ pub async fn handle_notes_and_media_update(
         }
     }
 
-    unpack_media(client, &deck.media_files, deck_id).await?;
+    //unpack_media(client, &deck.media_files, deck_id).await?;
 
     Ok(())
 }
@@ -271,7 +270,7 @@ async fn unpack_deck_data(
     commit: i32,
     deck_tree: &Vec<i64>,
 ) -> std::result::Result<String, Box<dyn std::error::Error>> {
-    
+    // TODO try async with multithreading: Create decks in one, fill in the notes in another
     handle_notes_and_media_update(client, deck, notetype_cache, req_ip, deck_id, approved, commit, deck_tree).await?;
 
     for child in &deck.children {
@@ -325,9 +324,12 @@ pub async fn unpack_deck_json(
         RETURNING id
     ").await?;
 
+    let cleaned_deck_name = cleanser::clean(&deck.name).to_string();
+    let cleaned_deck_desc = cleanser::clean(&deck.desc).to_string();
+
     let rows = client.query(&stmt, &[
-        &deck.name,
-        &deck.desc,
+        &cleaned_deck_name,
+        &cleaned_deck_desc,
         &owner,
         &parent,
         &deck.crowdanki_uuid,

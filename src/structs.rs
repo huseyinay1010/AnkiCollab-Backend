@@ -73,7 +73,6 @@ pub struct AnkiDeck {
     pub name: String,
     pub note_models: Option<Vec<Notetype>>,
     pub notes: Vec<Note>,
-    pub media_files: Vec<String>,
 }
 
 impl AnkiDeck {
@@ -186,4 +185,107 @@ pub struct StatsInfo {
 pub struct TokenInfo {
     pub token: String,
     pub deck_hash: String,
+}
+
+// Media management 
+
+#[derive(Debug, Serialize)]
+pub struct MediaDownloadItem {
+    pub filename: String,
+    pub download_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MediaManifestRequest {
+    pub user_token: String,
+    pub deck_hash: String,
+    pub filenames: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MediaManifestResponse {
+    pub files: Vec<MediaDownloadItem>,
+    pub file_count: i32,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MediaMissingFile {
+    pub hash: String,
+    pub note_id: i64,
+    pub filename: String,
+    pub file_size: i64,
+    pub presigned_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MediaBulkCheckResponse {
+    pub existing_files: Vec<MediaExistingFile>,
+    pub missing_files: Vec<MediaMissingFile>,
+    pub failed_files: Vec<MediaFileInfo>,
+    pub batch_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MediaBulkConfirmRequest {
+    pub batch_id: String,
+    pub confirmed_files: Vec<String>, // List of file hashes that were uploaded
+}
+
+#[derive(Debug, Serialize)]
+pub struct MediaBulkConfirmResponse {
+    pub processed_files: Vec<MediaProcessedFile>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MediaProcessedFile {
+    pub hash: String,
+    pub media_id: i64,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MediaBulkCheckRequest {
+    pub token: String,
+    pub deck_hash: String,
+    pub files: Vec<MediaFileInfo>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct MediaFileInfo {
+    pub hash: String,
+    pub filename: String,
+    pub note_guid: String,
+    pub file_size: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MediaExistingFile {
+    pub hash: String,
+    pub media_id: i64,
+}
+
+// SVG sanitization structures
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SvgFileItem {
+    pub filename: String,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SvgSanitizeRequest {
+    pub svg_files: Vec<SvgFileItem>
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SanitizedSvgItem {
+    pub filename: String,
+    pub content: String,
+    pub hash: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SvgSanitizeResponse {
+    pub sanitized_files: Vec<SanitizedSvgItem>
 }
