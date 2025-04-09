@@ -39,7 +39,7 @@ lazy_static! {
 }
 
 const PRESIGNED_URL_EXPIRATION: u64 = 15; // minutes
-const SIGNATURE_CHECK_BYTES: usize = 16; // Maximum bytes needed for file signature validation
+const SIGNATURE_CHECK_BYTES: usize = 128; // Maximum bytes needed for file signature validation
 
 // Initialize media tables in database
 pub async fn init_media_tables(db: &Client) -> std::result::Result<(), PgError> {
@@ -417,7 +417,7 @@ pub async fn start_cleanup_task(state: Arc<AppState>) {
                                 let id: i64 = row.get(0);
                                 let hash: String = row.get(1);
                                 let note_id = client.query_opt(
-                                    "SELECT id FROM media_references WHERE media_id = $1",
+                                    "SELECT id FROM media_references WHERE media_id = $1 LIMIT 1",
                                     &[&id]
                                 ).await.unwrap();
                                 if note_id.is_none() {
@@ -503,21 +503,9 @@ pub async fn check_media_bulk(
         if is_allowed_extension(&file.filename) {
             valid_files.push(file);
         } else {
+            //println!("Invalid file extension: {}", file.filename.clone());
             invalid_files.push(file);
         }
-    }
-
-    // Calculate total potential storage cost
-    let total_potential_bytes: u64 = valid_files.iter()
-    .map(|f| f.file_size as u64)
-    .sum();
-
-    // check user-specific quota
-    if !state.rate_limiter.check_user_upload_allowed(user_id, ip_address, valid_files.len() as u32, total_potential_bytes).await {
-        return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            "You reached the upload limit. Please try again tomorrow.".to_string()
-        ));
     }
    
     let mut db_client = state.db_pool.get().await.map_err(|err| {
@@ -607,6 +595,27 @@ pub async fn check_media_bulk(
     let mut missing_files_response = Vec::new();
 
     let mut invalid_hash_set = HashSet::new();
+
+    
+    // Calculate total potential storage cost
+    let total_potential_bytes: u64 = valid_files.iter()
+    .map(|f| // file size of the file.hash not in existing_media_ids_map
+        if existing_media_ids_map.contains_key(&f.hash) {
+            0
+        } else {
+            f.file_size as u64
+        })
+    .sum();
+    let potential_file_count = valid_files.len() - existing_media_ids_map.len();
+
+    // check user-specific quota
+    if !state.rate_limiter.check_user_upload_allowed(user_id, ip_address, potential_file_count as u32, total_potential_bytes).await {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "You reached the upload limit. Please try again tomorrow.".to_string()
+        ));
+    }
+    
     // Generate presigned URLs for each missing file
     for file in &valid_files {
         if let Some(&media_id) = existing_media_ids_map.get(&file.hash) {
@@ -619,12 +628,14 @@ pub async fn check_media_bulk(
                 Some(nid) => nid,
                 None => {
                     invalid_hash_set.insert(file.hash.clone());
+                    //println!("Note ID not found for file: {}", file.filename);
                     continue; // Skip if note ID is not found
                 }
             };
 
             if file.file_size <= 0 || file.file_size > MAX_FILE_SIZE_BYTES as i64 {
                 invalid_hash_set.insert(file.hash.clone());
+                //println!("Invalid file size for file: {}", file.filename);
                 continue; // Skip if file size is invalid
             }        
 
@@ -632,6 +643,7 @@ pub async fn check_media_bulk(
                 Some(content_type) => content_type,
                 None => {
                     invalid_hash_set.insert(file.hash.clone());
+                    //println!("Invalid file content type for file: {}", file.filename);
                     continue; // Skip if content type is invalid
                 }
             };
@@ -842,7 +854,7 @@ pub async fn confirm_media_bulk_upload(
                     if actual_size > MAX_FILE_SIZE_BYTES as i64 || actual_size == 0 ||
                     (actual_size_f64 > file_size_f64 * 1.01) || // Allow 1% tolerance
                     (actual_size_f64 < file_size_f64 * 0.99) {  // Allow 1% tolerance
-                        println!("File size mismatch: expected {}, got {}", file.file_size, actual_size);
+                        //println!("File size mismatch: expected {}, got {}", file.file_size, actual_size);
                         // Delete invalid file
                         let _ = state.s3_client.delete_object()
                             .bucket(MEDIA_BUCKET.as_str())
@@ -886,6 +898,8 @@ pub async fn confirm_media_bulk_upload(
                                     success: false,
                                     error: Some("Invalid file".to_string()),
                                 });
+
+                                //println!("File validation (stream) failed for: {}", file.filename);
                                 continue;
                             }
                             // File is valid, add to database
@@ -1233,7 +1247,7 @@ fn is_allowed_extension(filename: &str) -> bool {
 
     if !filename.chars().all(|c| {
         !c.is_control() &&
-        (c.is_alphanumeric() || c == '.' || c == '-' || c == '_' || c == ' ' || c == '(' || c == ')' || c == '+' || c == ',')
+        (c.is_alphanumeric() || c == '.' || c == '-' || c == '_' || c == ' ' || c == '(' || c == ')' || c == '+' || c == ',' || c == '%' || c == '&')
     }) {
         return false;
     }
@@ -1268,10 +1282,10 @@ pub async fn get_media_manifest(
 ) -> Result<Json<MediaManifestResponse>, (StatusCode, String)> {
     
     let user_id = auth::get_user_from_token(&state, &req.user_token).await
-    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Error authenticating user".to_string()))?;
+    .map_err(|_| (StatusCode::UNAUTHORIZED, "Error authenticating user (1)".to_string()))?;
     
     if user_id == 0 {
-        return Err((StatusCode::UNAUTHORIZED, "Invalid token".to_string()));
+        return Err((StatusCode::UNAUTHORIZED, "Error authenticating user (2)".to_string()));
     }
 
     if req.filenames.is_empty() {
@@ -1352,7 +1366,7 @@ pub async fn get_media_manifest(
             )
             .await.map_err(|err| {
                 println!("Error generating presigned URL for {}: {}", hash, err);
-                (StatusCode::INTERNAL_SERVER_ERROR, "Error generating presigned URLs".to_string())
+                (StatusCode::INTERNAL_SERVER_ERROR, "Error generating download link".to_string())
             })?;
         
         file_entries.push(MediaDownloadItem {
