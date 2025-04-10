@@ -20,7 +20,7 @@ const METRICS_REPORT_INTERVAL_SECS: u64 = 3600 * 24;
 
 /// Storage Limits
 const MAX_STORAGE_BYTES: u64 = 500 * 1024 * 1024 * 1024; // set in env
-const MAX_USER_STORAGE_BYTES: u64 = 3000 * 1024 * 1024;  // 3GB per user?
+const MAX_USER_STORAGE_BYTES: u64 = 10000 * 1024 * 1024;  // 10GB per user?
 
 /// User-based limits
 const MAX_USER_DAILY_UPLOADS: u32 = 20_000; // 20k uploads per day (for now the transition phase, will reduce later)

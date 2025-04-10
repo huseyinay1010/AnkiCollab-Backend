@@ -315,7 +315,6 @@ pub async fn unpack_notetype(client: &mut SharedConn, notetype: &Notetype, deck:
 
     let original_stock_kind = notetype.originalStockKind.unwrap_or(0);
 
-    let cleaned_name = ammonia::clean(&notetype.name);
     let req_json = serde_json::to_string(&notetype.req)?;
     let rows = tx.query(&insert_notetype_stmt, &[
         &notetype.crowdanki_uuid,
@@ -324,7 +323,7 @@ pub async fn unpack_notetype(client: &mut SharedConn, notetype: &Notetype, deck:
         &notetype.latexPost,
         &notetype.latexPre,
         &notetype.latexsvg,
-        &cleaned_name,
+        &notetype.name,
         &notetype.type_,
         &original_stock_kind,
         &notetype.sortf,
@@ -337,14 +336,13 @@ pub async fn unpack_notetype(client: &mut SharedConn, notetype: &Notetype, deck:
     for (i, field) in notetype.flds.iter().enumerate().map(|(i, field)| (i as u32, field)) {
         let anki_id = field.id.unwrap_or(0);
         let tag = field.tag.unwrap_or(0);
-        let cleaned_field_name = ammonia::clean(&field.name);
         let cleaned_field_description = ammonia::clean(&field.description);
 
         tx.execute(&insert_notetype_field_stmt, &[
             &id,
             &cleaned_field_description,
             &field.font,
-            &cleaned_field_name,
+            &field.name,
             &field.ord,
             &field.rtl,
             &field.size,
@@ -357,7 +355,6 @@ pub async fn unpack_notetype(client: &mut SharedConn, notetype: &Notetype, deck:
 
     for (i, template) in notetype.tmpls.iter().enumerate().map(|(i, template)| (i as u32, template)) {
         let anki_id = template.id.unwrap_or(0);
-        let cleaned_template_name = ammonia::clean(&template.name);
 
         tx.execute(&insert_notetype_template_stmt, &[
             &id,
@@ -367,7 +364,7 @@ pub async fn unpack_notetype(client: &mut SharedConn, notetype: &Notetype, deck:
             &template.bafmt,
             &template.bfont,
             &template.bsize,
-            &cleaned_template_name,
+            &template.name,
             &i,
             &anki_id,
             &template.ord,
