@@ -2,12 +2,13 @@
 -- PostgreSQL database dump
 --
 
--- Dumped from database version 14.11 (Ubuntu 14.11-0ubuntu0.22.04.1)
--- Dumped by pg_dump version 14.11 (Ubuntu 14.11-0ubuntu0.22.04.1)
+-- Dumped from database version 17.4 (Ubuntu 17.4-1.pgdg24.04+2)
+-- Dumped by pg_dump version 17.4 (Ubuntu 17.4-1.pgdg24.04+2)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
+SET transaction_timeout = 0;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
@@ -24,6 +25,15 @@ CREATE SCHEMA anki;
 
 
 ALTER SCHEMA anki OWNER TO postgres;
+
+--
+-- Name: public; Type: SCHEMA; Schema: -; Owner: postgres
+--
+
+-- *not* creating schema, since initdb creates it
+
+
+ALTER SCHEMA public OWNER TO postgres;
 
 --
 -- Name: delete_deck(text); Type: FUNCTION; Schema: anki; Owner: postgres
@@ -161,8 +171,13 @@ SET default_table_access_method = heap;
 
 CREATE TABLE anki.auth_tokens (
     id integer NOT NULL,
-    user_id integer,
-    token character varying(32)
+    user_id integer NOT NULL,
+    token_hash bytea NOT NULL,
+    refresh_token_hash bytea,
+    expires_at timestamp with time zone NOT NULL,
+    refresh_expires_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_used_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -172,22 +187,14 @@ ALTER TABLE anki.auth_tokens OWNER TO postgres;
 -- Name: auth_tokens_id_seq; Type: SEQUENCE; Schema: anki; Owner: postgres
 --
 
-CREATE SEQUENCE anki.auth_tokens_id_seq
-    AS integer
+ALTER TABLE anki.auth_tokens ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME anki.auth_tokens_id_seq
     START WITH 1
     INCREMENT BY 1
     NO MINVALUE
     NO MAXVALUE
-    CACHE 1;
-
-
-ALTER TABLE anki.auth_tokens_id_seq OWNER TO postgres;
-
---
--- Name: auth_tokens_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
---
-
-ALTER SEQUENCE anki.auth_tokens_id_seq OWNED BY anki.auth_tokens.id;
+    CACHE 1
+);
 
 
 --
@@ -232,7 +239,7 @@ CREATE SEQUENCE anki.card_deletion_suggestions_id_seq
     CACHE 1;
 
 
-ALTER TABLE anki.card_deletion_suggestions_id_seq OWNER TO postgres;
+ALTER SEQUENCE anki.card_deletion_suggestions_id_seq OWNER TO postgres;
 
 --
 -- Name: card_deletion_suggestions_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
@@ -267,7 +274,7 @@ CREATE SEQUENCE anki.changelogs_id_seq
     CACHE 1;
 
 
-ALTER TABLE anki.changelogs_id_seq OWNER TO postgres;
+ALTER SEQUENCE anki.changelogs_id_seq OWNER TO postgres;
 
 --
 -- Name: changelogs_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
@@ -306,7 +313,7 @@ CREATE SEQUENCE anki.commits_commit_id_seq
     CACHE 1;
 
 
-ALTER TABLE anki.commits_commit_id_seq OWNER TO postgres;
+ALTER SEQUENCE anki.commits_commit_id_seq OWNER TO postgres;
 
 --
 -- Name: commits_commit_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
@@ -330,7 +337,7 @@ CREATE TABLE anki.decks (
     human_hash character varying(255) DEFAULT NULL::character varying,
     creator_ip character varying(255),
     full_path text,
-    private boolean DEFAULT false,
+    private boolean DEFAULT true,
     stats_enabled boolean DEFAULT false,
     retention real,
     notes_with_stats_count integer DEFAULT 0,
@@ -399,7 +406,7 @@ CREATE MATERIALIZED VIEW anki.deck_stats AS
   WITH NO DATA;
 
 
-ALTER TABLE anki.deck_stats OWNER TO postgres;
+ALTER MATERIALIZED VIEW anki.deck_stats OWNER TO postgres;
 
 --
 -- Name: decks_id_seq; Type: SEQUENCE; Schema: anki; Owner: postgres
@@ -413,7 +420,7 @@ CREATE SEQUENCE anki.decks_id_seq
     CACHE 1;
 
 
-ALTER TABLE anki.decks_id_seq OWNER TO postgres;
+ALTER SEQUENCE anki.decks_id_seq OWNER TO postgres;
 
 --
 -- Name: decks_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
@@ -451,7 +458,7 @@ CREATE SEQUENCE anki.fields_id_seq
     CACHE 1;
 
 
-ALTER TABLE anki.fields_id_seq OWNER TO postgres;
+ALTER SEQUENCE anki.fields_id_seq OWNER TO postgres;
 
 --
 -- Name: fields_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
@@ -486,7 +493,7 @@ CREATE SEQUENCE anki.maintainers_id_seq
     CACHE 1;
 
 
-ALTER TABLE anki.maintainers_id_seq OWNER TO postgres;
+ALTER SEQUENCE anki.maintainers_id_seq OWNER TO postgres;
 
 --
 -- Name: maintainers_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
@@ -509,6 +516,47 @@ CREATE TABLE anki.media (
 ALTER TABLE anki.media OWNER TO postgres;
 
 --
+-- Name: media_bulk_uploads; Type: TABLE; Schema: anki; Owner: postgres
+--
+
+CREATE TABLE anki.media_bulk_uploads (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    metadata jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+ALTER TABLE anki.media_bulk_uploads OWNER TO postgres;
+
+--
+-- Name: media_files; Type: TABLE; Schema: anki; Owner: postgres
+--
+
+CREATE TABLE anki.media_files (
+    id bigint NOT NULL,
+    hash character varying(64) NOT NULL,
+    file_size bigint DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+ALTER TABLE anki.media_files OWNER TO postgres;
+
+--
+-- Name: media_files_id_seq; Type: SEQUENCE; Schema: anki; Owner: postgres
+--
+
+ALTER TABLE anki.media_files ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME anki.media_files_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: media_id_seq; Type: SEQUENCE; Schema: anki; Owner: postgres
 --
 
@@ -521,13 +569,73 @@ CREATE SEQUENCE anki.media_id_seq
     CACHE 1;
 
 
-ALTER TABLE anki.media_id_seq OWNER TO postgres;
+ALTER SEQUENCE anki.media_id_seq OWNER TO postgres;
 
 --
 -- Name: media_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
 --
 
 ALTER SEQUENCE anki.media_id_seq OWNED BY anki.media.id;
+
+
+--
+-- Name: media_operations_log; Type: TABLE; Schema: anki; Owner: postgres
+--
+
+CREATE TABLE anki.media_operations_log (
+    id bigint NOT NULL,
+    operation_type integer NOT NULL,
+    user_id integer,
+    ip_address character varying(45) NOT NULL,
+    "timestamp" timestamp with time zone NOT NULL,
+    file_hash character varying(64),
+    file_name character varying(255),
+    file_size bigint
+);
+
+
+ALTER TABLE anki.media_operations_log OWNER TO postgres;
+
+--
+-- Name: media_operations_log_id_seq; Type: SEQUENCE; Schema: anki; Owner: postgres
+--
+
+ALTER TABLE anki.media_operations_log ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME anki.media_operations_log_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: media_references; Type: TABLE; Schema: anki; Owner: postgres
+--
+
+CREATE TABLE anki.media_references (
+    id bigint NOT NULL,
+    media_id bigint NOT NULL,
+    note_id bigint,
+    file_name character varying(255) NOT NULL
+);
+
+
+ALTER TABLE anki.media_references OWNER TO postgres;
+
+--
+-- Name: media_references_id_seq; Type: SEQUENCE; Schema: anki; Owner: postgres
+--
+
+ALTER TABLE anki.media_references ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME anki.media_references_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
 
 
 --
@@ -556,7 +664,7 @@ CREATE SEQUENCE anki.mediafolders_id_seq
     CACHE 1;
 
 
-ALTER TABLE anki.mediafolders_id_seq OWNER TO postgres;
+ALTER SEQUENCE anki.mediafolders_id_seq OWNER TO postgres;
 
 --
 -- Name: mediafolders_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
@@ -594,7 +702,7 @@ CREATE SEQUENCE anki.note_move_suggestions_id_seq
     CACHE 1;
 
 
-ALTER TABLE anki.note_move_suggestions_id_seq OWNER TO postgres;
+ALTER SEQUENCE anki.note_move_suggestions_id_seq OWNER TO postgres;
 
 --
 -- Name: note_move_suggestions_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
@@ -632,7 +740,7 @@ CREATE SEQUENCE anki.note_stats_id_seq
     CACHE 1;
 
 
-ALTER TABLE anki.note_stats_id_seq OWNER TO postgres;
+ALTER SEQUENCE anki.note_stats_id_seq OWNER TO postgres;
 
 --
 -- Name: note_stats_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
@@ -653,7 +761,7 @@ CREATE SEQUENCE anki.notes_id_seq
     CACHE 1;
 
 
-ALTER TABLE anki.notes_id_seq OWNER TO postgres;
+ALTER SEQUENCE anki.notes_id_seq OWNER TO postgres;
 
 --
 -- Name: notes_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
@@ -719,7 +827,7 @@ CREATE SEQUENCE anki.notetype_field_id_seq
     CACHE 1;
 
 
-ALTER TABLE anki.notetype_field_id_seq OWNER TO postgres;
+ALTER SEQUENCE anki.notetype_field_id_seq OWNER TO postgres;
 
 --
 -- Name: notetype_field_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
@@ -740,7 +848,7 @@ CREATE SEQUENCE anki.notetype_id_seq
     CACHE 1;
 
 
-ALTER TABLE anki.notetype_id_seq OWNER TO postgres;
+ALTER SEQUENCE anki.notetype_id_seq OWNER TO postgres;
 
 --
 -- Name: notetype_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
@@ -783,7 +891,7 @@ CREATE SEQUENCE anki.notetype_template_id_seq
     CACHE 1;
 
 
-ALTER TABLE anki.notetype_template_id_seq OWNER TO postgres;
+ALTER SEQUENCE anki.notetype_template_id_seq OWNER TO postgres;
 
 --
 -- Name: notetype_template_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
@@ -818,7 +926,7 @@ CREATE SEQUENCE anki.optional_tags_id_seq
     CACHE 1;
 
 
-ALTER TABLE anki.optional_tags_id_seq OWNER TO postgres;
+ALTER SEQUENCE anki.optional_tags_id_seq OWNER TO postgres;
 
 --
 -- Name: optional_tags_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
@@ -854,7 +962,7 @@ CREATE SEQUENCE anki.service_accounts_id_seq
     CACHE 1;
 
 
-ALTER TABLE anki.service_accounts_id_seq OWNER TO postgres;
+ALTER SEQUENCE anki.service_accounts_id_seq OWNER TO postgres;
 
 --
 -- Name: service_accounts_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
@@ -869,7 +977,7 @@ ALTER SEQUENCE anki.service_accounts_id_seq OWNED BY anki.service_accounts.id;
 
 CREATE TABLE anki.subscriptions (
     id integer NOT NULL,
-    ip_address character varying(255) NOT NULL,
+    user_hash character varying(255) NOT NULL,
     deck_id bigint NOT NULL
 );
 
@@ -889,7 +997,7 @@ CREATE SEQUENCE anki.subscriptions_id_seq
     CACHE 1;
 
 
-ALTER TABLE anki.subscriptions_id_seq OWNER TO postgres;
+ALTER SEQUENCE anki.subscriptions_id_seq OWNER TO postgres;
 
 --
 -- Name: subscriptions_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
@@ -927,7 +1035,7 @@ CREATE SEQUENCE anki.tags_id_seq
     CACHE 1;
 
 
-ALTER TABLE anki.tags_id_seq OWNER TO postgres;
+ALTER SEQUENCE anki.tags_id_seq OWNER TO postgres;
 
 --
 -- Name: tags_id_seq; Type: SEQUENCE OWNED BY; Schema: anki; Owner: postgres
@@ -935,6 +1043,21 @@ ALTER TABLE anki.tags_id_seq OWNER TO postgres;
 
 ALTER SEQUENCE anki.tags_id_seq OWNED BY anki.tags.id;
 
+
+--
+-- Name: user_quotas; Type: TABLE; Schema: anki; Owner: postgres
+--
+
+CREATE TABLE anki.user_quotas (
+    user_id integer NOT NULL,
+    storage_used bigint DEFAULT 0 NOT NULL,
+    upload_count integer DEFAULT 0 NOT NULL,
+    download_count integer DEFAULT 0 NOT NULL,
+    last_reset timestamp with time zone NOT NULL
+);
+
+
+ALTER TABLE anki.user_quotas OWNER TO postgres;
 
 --
 -- Name: users; Type: TABLE; Schema: public; Owner: postgres
@@ -963,20 +1086,13 @@ CREATE SEQUENCE public.users_id_seq
     CACHE 1;
 
 
-ALTER TABLE public.users_id_seq OWNER TO postgres;
+ALTER SEQUENCE public.users_id_seq OWNER TO postgres;
 
 --
 -- Name: users_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
 --
 
 ALTER SEQUENCE public.users_id_seq OWNED BY public.users.id;
-
-
---
--- Name: auth_tokens id; Type: DEFAULT; Schema: anki; Owner: postgres
---
-
-ALTER TABLE ONLY anki.auth_tokens ALTER COLUMN id SET DEFAULT nextval('anki.auth_tokens_id_seq'::regclass);
 
 
 --
@@ -1233,11 +1349,59 @@ ALTER TABLE ONLY anki.maintainers
 
 
 --
+-- Name: media_bulk_uploads media_bulk_uploads_pkey; Type: CONSTRAINT; Schema: anki; Owner: postgres
+--
+
+ALTER TABLE ONLY anki.media_bulk_uploads
+    ADD CONSTRAINT media_bulk_uploads_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: media_files media_files_hash_key; Type: CONSTRAINT; Schema: anki; Owner: postgres
+--
+
+ALTER TABLE ONLY anki.media_files
+    ADD CONSTRAINT media_files_hash_key UNIQUE (hash);
+
+
+--
+-- Name: media_files media_files_pkey; Type: CONSTRAINT; Schema: anki; Owner: postgres
+--
+
+ALTER TABLE ONLY anki.media_files
+    ADD CONSTRAINT media_files_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: media_operations_log media_operations_log_pkey; Type: CONSTRAINT; Schema: anki; Owner: postgres
+--
+
+ALTER TABLE ONLY anki.media_operations_log
+    ADD CONSTRAINT media_operations_log_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: media media_pkey; Type: CONSTRAINT; Schema: anki; Owner: postgres
 --
 
 ALTER TABLE ONLY anki.media
     ADD CONSTRAINT media_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: media_references media_references_media_id_note_id_key; Type: CONSTRAINT; Schema: anki; Owner: postgres
+--
+
+ALTER TABLE ONLY anki.media_references
+    ADD CONSTRAINT media_references_media_id_note_id_key UNIQUE (media_id, note_id);
+
+
+--
+-- Name: media_references media_references_pkey; Type: CONSTRAINT; Schema: anki; Owner: postgres
+--
+
+ALTER TABLE ONLY anki.media_references
+    ADD CONSTRAINT media_references_pkey PRIMARY KEY (id);
 
 
 --
@@ -1333,15 +1497,15 @@ ALTER TABLE ONLY anki.subscriptions
 --
 
 ALTER TABLE ONLY anki.subscriptions
-    ADD CONSTRAINT unique_ip_deck UNIQUE (ip_address, deck_id);
+    ADD CONSTRAINT unique_ip_deck UNIQUE (user_hash, deck_id);
 
 
 --
--- Name: auth_tokens unique_user_id; Type: CONSTRAINT; Schema: anki; Owner: postgres
+-- Name: user_quotas user_quotas_pkey; Type: CONSTRAINT; Schema: anki; Owner: postgres
 --
 
-ALTER TABLE ONLY anki.auth_tokens
-    ADD CONSTRAINT unique_user_id UNIQUE (user_id);
+ALTER TABLE ONLY anki.user_quotas
+    ADD CONSTRAINT user_quotas_pkey PRIMARY KEY (user_id);
 
 
 --
@@ -1407,6 +1571,34 @@ CREATE INDEX idx_16429_notetype ON anki.notetype_template USING btree (notetype)
 --
 
 CREATE INDEX idx_16436_note ON anki.tags USING btree (note);
+
+
+--
+-- Name: idx_auth_tokens_expires_at; Type: INDEX; Schema: anki; Owner: postgres
+--
+
+CREATE INDEX idx_auth_tokens_expires_at ON anki.auth_tokens USING btree (expires_at);
+
+
+--
+-- Name: idx_auth_tokens_refresh_token_hash; Type: INDEX; Schema: anki; Owner: postgres
+--
+
+CREATE INDEX idx_auth_tokens_refresh_token_hash ON anki.auth_tokens USING btree (refresh_token_hash);
+
+
+--
+-- Name: idx_auth_tokens_token_hash; Type: INDEX; Schema: anki; Owner: postgres
+--
+
+CREATE INDEX idx_auth_tokens_token_hash ON anki.auth_tokens USING btree (token_hash);
+
+
+--
+-- Name: idx_auth_tokens_user_id; Type: INDEX; Schema: anki; Owner: postgres
+--
+
+CREATE UNIQUE INDEX idx_auth_tokens_user_id ON anki.auth_tokens USING btree (user_id);
 
 
 --
@@ -1477,6 +1669,41 @@ CREATE INDEX media_deck_idx ON anki.media USING btree (deck);
 --
 
 CREATE UNIQUE INDEX media_filename_deck_key ON anki.media USING btree (md5(filename), deck);
+
+
+--
+-- Name: media_files_hash_idx; Type: INDEX; Schema: anki; Owner: postgres
+--
+
+CREATE INDEX media_files_hash_idx ON anki.media_files USING btree (hash);
+
+
+--
+-- Name: media_references_file_name_idx; Type: INDEX; Schema: anki; Owner: postgres
+--
+
+CREATE INDEX media_references_file_name_idx ON anki.media_references USING btree (file_name);
+
+
+--
+-- Name: media_references_media_idx; Type: INDEX; Schema: anki; Owner: postgres
+--
+
+CREATE INDEX media_references_media_idx ON anki.media_references USING btree (media_id);
+
+
+--
+-- Name: media_references_note_id_idx; Type: INDEX; Schema: anki; Owner: postgres
+--
+
+CREATE INDEX media_references_note_id_idx ON anki.media_references USING btree (note_id);
+
+
+--
+-- Name: notes_guid_idx; Type: INDEX; Schema: anki; Owner: postgres
+--
+
+CREATE INDEX notes_guid_idx ON anki.notes USING btree (guid);
 
 
 --
@@ -1690,6 +1917,30 @@ ALTER TABLE ONLY anki.media
 
 
 --
+-- Name: media_operations_log media_operations_log_user_id_fkey; Type: FK CONSTRAINT; Schema: anki; Owner: postgres
+--
+
+ALTER TABLE ONLY anki.media_operations_log
+    ADD CONSTRAINT media_operations_log_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: media_references media_references_media_id_fkey; Type: FK CONSTRAINT; Schema: anki; Owner: postgres
+--
+
+ALTER TABLE ONLY anki.media_references
+    ADD CONSTRAINT media_references_media_id_fkey FOREIGN KEY (media_id) REFERENCES anki.media_files(id) ON DELETE CASCADE;
+
+
+--
+-- Name: media_references media_references_note_id_fkey; Type: FK CONSTRAINT; Schema: anki; Owner: postgres
+--
+
+ALTER TABLE ONLY anki.media_references
+    ADD CONSTRAINT media_references_note_id_fkey FOREIGN KEY (note_id) REFERENCES anki.notes(id) ON DELETE CASCADE;
+
+
+--
 -- Name: mediafolders mediafolders_deck_fkey; Type: FK CONSTRAINT; Schema: anki; Owner: postgres
 --
 
@@ -1815,6 +2066,22 @@ ALTER TABLE ONLY anki.tags
 
 ALTER TABLE ONLY anki.tags
     ADD CONSTRAINT tags_note_fkey FOREIGN KEY (note) REFERENCES anki.notes(id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_quotas user_quotas_user_id_fkey; Type: FK CONSTRAINT; Schema: anki; Owner: postgres
+--
+
+ALTER TABLE ONLY anki.user_quotas
+    ADD CONSTRAINT user_quotas_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: SCHEMA public; Type: ACL; Schema: -; Owner: postgres
+--
+
+REVOKE USAGE ON SCHEMA public FROM PUBLIC;
+GRANT ALL ON SCHEMA public TO PUBLIC;
 
 
 --
