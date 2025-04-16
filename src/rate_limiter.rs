@@ -323,8 +323,8 @@ impl RateLimiter {
         
         // Check if download limit exceeded
         if counter.downloads + file_count >= MAX_USER_DAILY_DOWNLOADS {
-            println!("Download limit exceeded for IP {}: {}/{}", 
-                 ip, counter.downloads, MAX_USER_DAILY_DOWNLOADS);
+            // println!("Download limit exceeded for IP {}: {}/{}", 
+            //      ip, counter.downloads, MAX_USER_DAILY_DOWNLOADS);
             return false;
         }
         
@@ -358,8 +358,8 @@ impl RateLimiter {
         
         // safe threshhold as user bc they should be the same unles they are in a shared network idk
         if counter.uploads + file_count>= MAX_USER_DAILY_UPLOADS {
-            println!("Upload limit exceeded for IP {}: {}/{}", 
-                 ip, counter.uploads, MAX_USER_DAILY_UPLOADS);
+            // println!("Upload limit exceeded for IP {}: {}/{}", 
+            //      ip, counter.uploads, MAX_USER_DAILY_UPLOADS);
             return false;
         }
         
@@ -417,8 +417,8 @@ impl RateLimiter {
         // Check daily upload limit
         let uploads = quota.upload_count.load(Ordering::Relaxed);
         if uploads + file_count >= MAX_USER_DAILY_UPLOADS {
-            println!("User {} exceeded daily upload limit: {}/{}", 
-                 user_id, uploads, MAX_USER_DAILY_UPLOADS);
+            // println!("User {} exceeded daily upload limit: {}/{}", 
+            //      user_id, uploads, MAX_USER_DAILY_UPLOADS);
             return false;
         }
         
@@ -453,8 +453,8 @@ impl RateLimiter {
         // Check daily download limit
         let downloads = quota.download_count.load(Ordering::Relaxed);
         if downloads + file_count >= MAX_USER_DAILY_DOWNLOADS {
-            println!("User {} exceeded daily download limit: {}/{}", 
-                 user_id, downloads, MAX_USER_DAILY_DOWNLOADS);
+            // println!("User {} exceeded daily download limit: {}/{}", 
+            //      user_id, downloads, MAX_USER_DAILY_DOWNLOADS);
             return false;
         }
         

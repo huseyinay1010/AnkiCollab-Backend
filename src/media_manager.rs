@@ -758,32 +758,36 @@ pub async fn confirm_media_bulk_upload(
         return Err((StatusCode::BAD_REQUEST, "Invalid Format".to_string()));
     }
 
-    let mut db_client = state.db_pool.get().await.map_err(|err| {
-        println!("Error getting pool: {}", err);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
-    })?;
-
     let batch_id_uuid = Uuid::parse_str(&req.batch_id).map_err(|_| {
         (StatusCode::BAD_REQUEST, "Invalid batch ID".to_string())
-    })?;  
-    // Retrieve the bulk upload metadata
-    let metadata_row = db_client.query_opt(
-        "SELECT metadata FROM media_bulk_uploads WHERE id = $1",
-        &[&batch_id_uuid]
-    ).await.map_err(|err| {
-        println!("Error querying database: {}", err);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Error retrieving upload metadata".to_string())
     })?;
 
-    let metadata_json: serde_json::Value = match metadata_row {
-        Some(row) => row.get(0),
-        None => return Err((StatusCode::NOT_FOUND, "Batch not found or expired".to_string())),
+    let files: Vec<MediaMissingFile> = {
+        let db_client = state.db_pool.get().await.map_err(|err| {
+            println!("Error getting pool: {}", err);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
+        })?;
+
+        // Retrieve the bulk upload metadata
+        let metadata_row = db_client.query_opt(
+            "SELECT metadata FROM media_bulk_uploads WHERE id = $1",
+            &[&batch_id_uuid]
+        ).await.map_err(|err| {
+            println!("Error querying database: {}", err);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Error retrieving upload metadata".to_string())
+        })?;
+
+        let metadata_json: serde_json::Value = match metadata_row {
+            Some(row) => row.get(0),
+            None => return Err((StatusCode::NOT_FOUND, "Batch not found or expired".to_string())),
+        };
+
+        serde_json::from_value(metadata_json).map_err(|err| {
+            println!("Error parsing metadata: {}", err);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Error parsing upload metadata".to_string())
+        })?
     };
 
-    let files: Vec<MediaMissingFile> = serde_json::from_value(metadata_json).map_err(|err| {
-        println!("Error parsing metadata: {}", err);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Error parsing upload metadata".to_string())
-    })?;
 
     // Find files that client claims were uploaded
     let confirmed_hashes: HashSet<String> = req.confirmed_files.into_iter().collect();
@@ -795,34 +799,50 @@ pub async fn confirm_media_bulk_upload(
         .filter(|f| !confirmed_hashes.contains(&f.hash))
         .collect();
 
-    // Process the uploaded files
-    let mut processed_files = Vec::new();
-    let tx = db_client.transaction().await.map_err(|err| {
-        println!("Error starting transaction: {}", err);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
-    })?;
 
-    let note_ids: Vec<i64> = confirmed_files.iter()
-    .map(|f| f.note_id)
-    .collect();
+    let valid_note_ids: HashSet<i64> = {
+        let note_ids: Vec<i64> = confirmed_files.iter()
+            .map(|f| f.note_id)
+            .collect();
 
-    // validate notes
-    let valid_notes = tx.query(
-    "SELECT id FROM notes WHERE id = ANY($1) AND deleted = false",
-    &[&note_ids]
-    ).await.map_err(|err| {
-        println!("Error querying database: {}", err);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
-    })?;
+        if note_ids.is_empty() {
+             HashSet::new()
+        } else {
+             let db_client = state.db_pool.get().await.map_err(|err| {
+                println!("Error getting pool: {}", err);
+                (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
+            })?;
 
-    let valid_note_ids: HashSet<i64> = valid_notes.iter()
-    .map(|row| row.get::<_, i64>(0))
-    .collect();
+            // validate notes
+            let valid_notes = db_client.query(
+            "SELECT id FROM notes WHERE id = ANY($1) AND deleted = false",
+            &[&note_ids]
+            ).await.map_err(|err| {
+                println!("Error querying database: {}", err);
+                (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
+            })?;
+
+            valid_notes.iter()
+            .map(|row| row.get::<_, i64>(0))
+            .collect()
+        }
+    };
+
+
+    // Collect results of S3 validation to perform DB operations later in a transaction
+    struct ValidatedFile {
+        hash: String,
+        actual_size: i64,
+        note_id: i64,
+        filename: String,
+    }
+    let mut files_to_insert_in_db: Vec<ValidatedFile> = Vec::new();
+    let mut processed_files_results: Vec<MediaProcessedFile> = Vec::new(); // Stores immediate success/failure info
 
     for file in &confirmed_files {
         let prefix = &file.hash[0..2];
         let s3_key = format!("{}/{}", prefix, file.hash);
-        
+
         // Verify the file exists in S3 and check its properties
         match state.s3_client.head_object()
             .bucket(MEDIA_BUCKET.as_str())
@@ -831,14 +851,14 @@ pub async fn confirm_media_bulk_upload(
             .await {
                 Ok(head_response) => {
                     if !valid_note_ids.contains(&file.note_id) {
-                        // Delete invalid file
+                        // Delete invalid file (associated note invalid/deleted)
                         let _ = state.s3_client.delete_object()
                             .bucket(MEDIA_BUCKET.as_str())
                             .key(&s3_key)
                             .send()
                             .await;
-                            
-                        processed_files.push(MediaProcessedFile {
+
+                        processed_files_results.push(MediaProcessedFile {
                             hash: file.hash.clone(),
                             media_id: 0i64,
                             success: false,
@@ -854,15 +874,14 @@ pub async fn confirm_media_bulk_upload(
                     if actual_size > MAX_FILE_SIZE_BYTES as i64 || actual_size == 0 ||
                     (actual_size_f64 > file_size_f64 * 1.01) || // Allow 1% tolerance
                     (actual_size_f64 < file_size_f64 * 0.99) {  // Allow 1% tolerance
-                        //println!("File size mismatch: expected {}, got {}", file.file_size, actual_size);
-                        // Delete invalid file
+                        // Delete invalid file (size mismatch)
                         let _ = state.s3_client.delete_object()
                             .bucket(MEDIA_BUCKET.as_str())
                             .key(&s3_key)
                             .send()
                             .await;
-                            
-                        processed_files.push(MediaProcessedFile {
+
+                        processed_files_results.push(MediaProcessedFile {
                             hash: file.hash.clone(),
                             media_id: 0i64,
                             success: false,
@@ -870,20 +889,21 @@ pub async fn confirm_media_bulk_upload(
                         });
                         continue;
                     }
-                                
+
+                    // Now try to get and validate the object content
                     let get_object_response = state.s3_client.get_object()
                         .bucket(MEDIA_BUCKET.as_str())
                         .key(&s3_key)
                         .send()
                         .await;
-                        
+
                     match get_object_response {
                         Ok(response) => {
                             // Validate the stream and calculate hash in one pass
                             let validation_result = validate_media_stream(response.body, &file.hash)
                                 .await
                                 .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Invalid data".to_string()))?;
-                            
+
                             if !validation_result {
                                 // Delete invalid file
                                 let _ = state.s3_client.delete_object()
@@ -891,65 +911,28 @@ pub async fn confirm_media_bulk_upload(
                                     .key(&s3_key)
                                     .send()
                                     .await;
-                                    
-                                processed_files.push(MediaProcessedFile {
+
+                                processed_files_results.push(MediaProcessedFile {
                                     hash: file.hash.clone(),
                                     media_id: 0i64,
                                     success: false,
                                     error: Some("Invalid file".to_string()),
                                 });
-
-                                //println!("File validation (stream) failed for: {}", file.filename);
                                 continue;
                             }
-                            // File is valid, add to database
-                            match tx.query_one(
-                                "INSERT INTO media_files (hash, file_size) 
-                                    VALUES ($1, $2) 
-                                    ON CONFLICT (hash) DO UPDATE 
-                                    SET file_size = EXCLUDED.file_size 
-                                    RETURNING id",
-                                &[&file.hash, &actual_size]
-                            ).await {
-                                Ok(row) => {
-                                    let media_id: i64 = row.get(0);
-                                    // Create reference
-                                    match tx.execute(
-                                        "INSERT INTO media_references (media_id, note_id, file_name) 
-                                        VALUES ($1, $2, $3)
-                                        ON CONFLICT (media_id, note_id) DO NOTHING",
-                                        &[&media_id, &file.note_id, &file.filename]
-                                    ).await {
-                                        Ok(_) => {
-                                            processed_files.push(MediaProcessedFile {
-                                                hash: file.hash.clone(),
-                                                media_id,
-                                                success: true,
-                                                error: None,
-                                            });
-                                        },
-                                        Err(e) => {
-                                            processed_files.push(MediaProcessedFile {
-                                                hash: file.hash.clone(),
-                                                media_id,
-                                                success: false,
-                                                error: Some(format!("Error creating reference: {}", e)),
-                                            });
-                                        }
-                                    }
-                                },
-                                Err(e) => {
-                                    processed_files.push(MediaProcessedFile {
-                                        hash: file.hash.clone(),
-                                        media_id: 0i64,
-                                        success: false,
-                                        error: Some(format!("Error inserting media file: {}", e)),
-                                    });
-                                }
-                            }
+
+                            // File passed all S3 and content checks, queue for DB insertion
+                            files_to_insert_in_db.push(ValidatedFile {
+                                hash: file.hash.clone(),
+                                actual_size,
+                                note_id: file.note_id,
+                                filename: file.filename.clone(),
+                            });
+                            // Don't add to processed_files_results yet, wait for DB result                                
                         },
                         Err(e) => {
-                            processed_files.push(MediaProcessedFile {
+                            // Failed to get object after successful head (should be rare)
+                            processed_files_results.push(MediaProcessedFile {
                                 hash: file.hash.clone(),
                                 media_id: 0i64,
                                 success: false,
@@ -959,7 +942,8 @@ pub async fn confirm_media_bulk_upload(
                     }
                 },
                 Err(e) => {
-                    processed_files.push(MediaProcessedFile {
+                    // Head object failed (file likely doesn't exist)
+                    processed_files_results.push(MediaProcessedFile {
                         hash: file.hash.clone(),
                         media_id: 0i64,
                         success: false,
@@ -969,8 +953,7 @@ pub async fn confirm_media_bulk_upload(
             }
     }
 
-    // handle the unconfirmed files (delete from S3) even though they likely dont even exist
-    // delete the files from S3
+    // Handle the unconfirmed files (delete from S3 attempt) - no DB interaction needed here
     for file in unconfirmed_files {
         let prefix = &file.hash[0..2];
         let s3_key = format!("{}/{}", prefix, file.hash);
@@ -978,40 +961,93 @@ pub async fn confirm_media_bulk_upload(
             .bucket(MEDIA_BUCKET.as_str())
             .key(&s3_key)
             .send()
-            .await;
+            .await; // Ignore errors, best effort cleanup
     }
 
-    // Track how much storage was uesd
-    let actual_bytes_stored: u64 = processed_files.iter()
-        .filter(|f| f.success)
-        .map(|f| {
-            // Find the original file size from the confirmed_files list
-            confirmed_files.iter()
-                .find(|cf| cf.hash == f.hash)
-                .map(|cf| cf.file_size as u64)
-                .unwrap_or(0)
-        })
-        .sum();
-    
-    // Track the global storage used
+    let mut final_processed_files = processed_files_results;
+    let mut actual_bytes_stored: u64 = 0;
+
+    if !files_to_insert_in_db.is_empty() {
+        let mut db_client = state.db_pool.get().await.map_err(|err| {
+            println!("Error getting pool: {}", err);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
+        })?;
+
+        let tx = db_client.transaction().await.map_err(|err| {
+            println!("Error starting transaction: {}", err);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
+        })?;
+
+        for file_to_insert in files_to_insert_in_db {
+            // Insert media file record
+             match tx.query_one(
+                "INSERT INTO media_files (hash, file_size)
+                    VALUES ($1, $2)
+                    ON CONFLICT (hash) DO UPDATE
+                    SET file_size = EXCLUDED.file_size
+                    RETURNING id",
+                &[&file_to_insert.hash, &file_to_insert.actual_size]
+            ).await {
+                Ok(row) => {
+                    let media_id: i64 = row.get(0);
+                    // Create reference
+                    match tx.execute(
+                        "INSERT INTO media_references (media_id, note_id, file_name)
+                        VALUES ($1, $2, $3)
+                        ON CONFLICT (media_id, note_id) DO NOTHING",
+                        &[&media_id, &file_to_insert.note_id, &file_to_insert.filename]
+                    ).await {
+                        Ok(_) => {
+                            final_processed_files.push(MediaProcessedFile {
+                                hash: file_to_insert.hash.clone(),
+                                media_id,
+                                success: true,
+                                error: None,
+                            });
+                            // Track bytes based on *original* reported size for successful inserts
+                            if let Some(original_file) = confirmed_files.iter().find(|cf| cf.hash == file_to_insert.hash) {
+                                actual_bytes_stored += original_file.file_size as u64;
+                            }
+                        },
+                        Err(e) => {
+                            // Log reference creation failure, but media file might be ok
+                            final_processed_files.push(MediaProcessedFile {
+                                hash: file_to_insert.hash.clone(),
+                                media_id, // Keep media_id as file was inserted
+                                success: false, // Overall operation for this file failed at reference step
+                                error: Some(format!("Error creating reference: {}", e)),
+                            });
+                        }
+                    }
+                },
+                Err(e) => {
+                    // Log media file insertion failure
+                    final_processed_files.push(MediaProcessedFile {
+                        hash: file_to_insert.hash.clone(),
+                        media_id: 0i64,
+                        success: false,
+                        error: Some(format!("Error inserting media file: {}", e)),
+                    });
+                }
+            }
+        }
+
+        let _ = tx.execute(
+            "DELETE FROM media_bulk_uploads WHERE id = $1",
+            &[&batch_id_uuid]
+        ).await;
+
+        tx.commit().await.map_err(|err| {
+            println!("Error committing transaction: {}", err);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
+        })?;
+    }
+
+    // Track the global storage used (only count bytes successfully stored AND committed)
     state.rate_limiter.storage_monitor().track_operation(actual_bytes_stored);
-    
-    let batch_id_uuid = Uuid::parse_str(&req.batch_id).map_err(|_| {
-        (StatusCode::BAD_REQUEST, "Invalid batch ID".to_string())
-    })?;
-    // Clean up the batch record
-    let _ = tx.execute(
-        "DELETE FROM media_bulk_uploads WHERE id = $1",
-        &[&batch_id_uuid]
-    ).await;
-    
-    tx.commit().await.map_err(|err| {
-        println!("Error committing transaction: {}", err);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
-    })?;
 
     Ok(Json(MediaBulkConfirmResponse {
-        processed_files,
+        processed_files: final_processed_files,
     }))
 }
 

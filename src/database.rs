@@ -27,11 +27,8 @@ pub async fn establish_pool_connection() -> Result<Pool<PostgresConnectionManage
     ).unwrap();
 
     let pool = Pool::builder()
-                .connection_timeout(core::time::Duration::new(60, 0))
                 .min_idle(Some(1))
                 .max_size(15)
-                .max_lifetime(Some(core::time::Duration::new(10, 0)))
-                .idle_timeout(Some(core::time::Duration::new(5, 0)))
                 .build(conn_manager).await?;
     Ok(pool)
 }
