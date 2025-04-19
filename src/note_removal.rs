@@ -13,7 +13,7 @@ pub async fn new(db_state: &Arc<database::AppState>,  guids: Vec<String>, commit
     let mut client = match db_state.db_pool.get().await {
         Ok(pool) => pool,
         Err(err) => {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             return Err("Failed to retrieve a pooled connection".into());
         },
     };
@@ -75,8 +75,9 @@ pub async fn new(db_state: &Arc<database::AppState>,  guids: Vec<String>, commit
 
         let result = tx.execute(&removal_req, &[&note_id, &ip, &commit_id]).await;
 
-        if let Err(_err) = result {
+        if let Err(err) = result {
             tx.rollback().await?;
+            println!("Error executing removal request: {err}");
             return Err("Cannot make the removal request".into());
         }
     }

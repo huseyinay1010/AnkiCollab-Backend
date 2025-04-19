@@ -1,5 +1,5 @@
 
-use crate::{database, structs::*};
+use crate::{database, structs::StatsInfo};
 
 use std::sync::Arc;
 
@@ -7,7 +7,7 @@ pub async fn new(db_state: &Arc<database::AppState>, info: StatsInfo) -> Result<
     let mut client = match db_state.db_pool.get().await {
         Ok(pool) => pool,
         Err(err) => {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             return Err("Failed to retrieve a pooled connection".into());
         },
     };

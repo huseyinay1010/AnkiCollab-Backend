@@ -5,9 +5,9 @@ use uuid::Uuid;
 
 
 
-use crate::structs::*;
-use crate::notetypes::*;
-use crate::suggestion::*;
+use crate::structs::{AnkiDeck, Note};
+use crate::notetypes::unpack_notetype;
+use crate::suggestion::{get_topmost_deck_by_note_id, is_valid_optional_tag, overwrite_note, update_note, update_note_timestamp};
 use crate::cleanser;
 
 use std::collections::HashMap;
@@ -87,7 +87,7 @@ pub async fn unpack_notes(client: &mut SharedConn, notes: Vec<&Note>, notetype_m
             // get protected fields from notetype
             let protected_fields = protected_fields_cache
                 .get(notetype_guid)
-                .ok_or_else(|| format!("Notetype {} not found in cache", notetype_guid))?;
+                .ok_or_else(|| format!("Notetype {notetype_guid} not found in cache"))?;
 
             
             let mut field_values: Vec<&(dyn ToSql + Sync)> = Vec::new();
@@ -103,7 +103,7 @@ pub async fn unpack_notes(client: &mut SharedConn, notes: Vec<&Note>, notetype_m
             // This is done to make sure the fields conform to the notetype. A mismatch between the notetype and the fields should not be allowed
             // It shouldn't really ever happen, but I have seen it happen in the wild (5 times in 150k notes). Not sure how users are doing it.
             let truncated_fields = if note.fields.len() > max_allowed_position as usize + 1 {
-                &note.fields[0..(max_allowed_position as usize + 1)]
+                &note.fields[0..=(max_allowed_position as usize)]
             } else {
                 &note.fields
             };
@@ -111,12 +111,12 @@ pub async fn unpack_notes(client: &mut SharedConn, notes: Vec<&Note>, notetype_m
             let indices: Vec<u32> = (0..=max_allowed_position).collect(); // Ugly, but done to avoid the temporary variable issue. #fixlater
 
             let cleaned_fields: Vec<String> = truncated_fields.iter()
-                .map(|field| cleanser::clean(field).to_string())
+                .map(|field| cleanser::clean(field))
                 .collect();
 
             // Pre-clean tags
             let cleaned_tags: Vec<String> = note.tags.iter()
-                .map(|tag| cleanser::clean(tag).to_string())
+                .map(|tag| cleanser::clean(tag))
                 .collect();
 
             // i = position of the field
@@ -208,7 +208,7 @@ pub async fn handle_notes_and_media_update(
         
             let guid = unpack_notetype(client, n, deck_id).await?;
         
-            cache.insert(n.crowdanki_uuid.to_owned(), guid.to_owned());
+            cache.insert(n.crowdanki_uuid.clone(), guid.clone());
         }
     }
 
@@ -348,7 +348,7 @@ pub async fn unpack_deck_json(
 
     match unpack_deck_data(client, deck, notetype_cache, owner, req_ip, id, approved, commit, deck_tree).await {
         Ok(_res) => { },
-        Err(error) => { println!("Error: {}", error) },
+        Err(error) => { println!("Error: {error}") },
     }
 
     Ok(hum)

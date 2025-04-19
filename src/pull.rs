@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::fmt::Write;
 
 use crate::database;
-use crate::notetypes::*;
-use crate::structs::*;
+use crate::notetypes::{get_notetypes, pull_protected_fields};
+use crate::structs::{AnkiDeck, Note, UpdateInfoResponse};
 use async_recursion::async_recursion;
 use std::collections::HashMap;
 
@@ -193,16 +193,13 @@ async fn get_changed_notes(
             let note_model_uuid: String = note_row.get(2);
             let note_model_id: i64 = note_row.get(3);
 
-            let notetype_size = match notetype_sizes.get(&note_model_id) {
-                Some(&size) => size,
-                None => {
-                    let notetype_size_rows = client
-                        .query(&notetype_size_query, &[&note_model_id])
-                        .await?;
-                    let notetype_size: i32 = notetype_size_rows[0].get(0);
-                    notetype_sizes.insert(note_model_id, notetype_size);
-                    notetype_size
-                }
+            let notetype_size = if let Some(&size) = notetype_sizes.get(&note_model_id) { size } else {
+                let notetype_size_rows = client
+                    .query(&notetype_size_query, &[&note_model_id])
+                    .await?;
+                let notetype_size: i32 = notetype_size_rows[0].get(0);
+                notetype_sizes.insert(note_model_id, notetype_size);
+                notetype_size
             };
 
             let mut fields = vec![String::new(); notetype_size as usize];
@@ -212,13 +209,12 @@ async fn get_changed_notes(
                         fields[*position as usize] = content.to_string();
                     } else {
                         println!(
-                            "Invalid field position: {}; note_id: {}; model id: {}",
-                            position, note_id, note_model_id
+                            "Invalid field position: {position}; note_id: {note_id}; model id: {note_model_id}"
                         );
                     }
                 }
             } else {
-                println!("No fields found for note: {}", note_id);
+                println!("No fields found for note: {note_id}");
                 continue;
             }
 
@@ -246,7 +242,7 @@ pub async fn pull_changes(
     let client = match db_state.db_pool.get_owned().await {
         Ok(pool) => pool,
         Err(err) => {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             return Err("Failed to retrieve a pooled connection".into());
         },
     };
@@ -314,7 +310,7 @@ pub async fn get_changelog_info(
         .fold(String::new(), |mut acc, row| {
             let message: String = row.get(0);
             let timestamp: String = row.get(1);
-            write!(acc, "--- Changes from {}: ---\n{}\n\n", timestamp, message).unwrap();
+            write!(acc, "--- Changes from {timestamp}: ---\n{message}\n\n").unwrap();
             acc
         });
 
@@ -344,7 +340,7 @@ pub async fn get_id_from_username(
     let client = match db_state.db_pool.get().await {
         Ok(pool) => pool,
         Err(err) => {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             return Err("Failed to retrieve a pooled connection".into());
         }
     };
@@ -367,7 +363,7 @@ pub async fn get_deck_last_update_unix(
     let client = match db_state.db_pool.get().await {
         Ok(pool) => pool,
         Err(err) => {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             return Err("Failed to retrieve a pooled connection".into());
         }
     };
@@ -389,7 +385,7 @@ pub async fn check_deck_alive(
     let client = match db_state.db_pool.get().await {
         Ok(pool) => pool,
         Err(err) => {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             return Err("Failed to retrieve a pooled connection".into());
         }
     };

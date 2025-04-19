@@ -1,4 +1,8 @@
-
+#![warn(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+)]
 pub mod database;
 pub mod structs;
 pub mod human_hash;
@@ -51,10 +55,9 @@ use tower_governor::{governor::GovernorConfigBuilder, key_extractor::SmartIpKeyE
 
 use aws_sdk_s3::Client as S3Client;
 
-use axum_macros::debug_handler;
 
 fn read_cached_json(file_name: &str) -> Option<String> {
-    let path = format!("/home/cached_files/{}", file_name);
+    let path = format!("/home/cached_files/{file_name}");
     match fs::read_to_string(path) {
         Ok(data) => Some(data),
         Err(_) => None
@@ -79,8 +82,8 @@ async fn post_login(
             (StatusCode::OK, json)
         },
         Err(error) => {
-            println!("Error occurred: {}", error);
-            (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+            //println!("Error occurred: {}", error);
+            (StatusCode::INTERNAL_SERVER_ERROR, error)
         },
     }
 }
@@ -90,9 +93,9 @@ pub async fn remove_token(
     Path(token): Path<String>,
 ) -> impl IntoResponse {
     match auth::remove_token(&db_state, &token).await {
-        Ok(res) => (StatusCode::OK, res.to_string()),
-        Err(error) => {
-            println!("Error deleting token: {}", error);
+        Ok(res) => (StatusCode::OK, res),
+        Err(_error) => {
+            //println!("Error deleting token: {}", error);
             (StatusCode::INTERNAL_SERVER_ERROR, "Error".to_string())
         }
     }
@@ -112,8 +115,8 @@ pub async fn upload_deck_stats(
 
     tokio::spawn(async move {
         match stats::new(&db_state_clone, info).await {
-            Ok(_) => {},
-            Err(error) => { println!("Error inserting deck stats: {}", error); },
+            Ok(()) => {},
+            Err(error) => { println!("Error inserting deck stats: {error}"); },
         }
     });
 
@@ -125,11 +128,11 @@ pub async fn confirm_media_bulk_async(
     Json(req): Json<structs::MediaBulkConfirmRequest>,
 ) -> impl IntoResponse {
     // we handle the confirmation in a seperate thread, so the user doesn't have to wait for it to finish, lacking information on which files failed to upload, trading off speed for user experience
-    let state_copy = state.clone();
+    let state_copy = state;
     tokio::spawn(async move {
         match media_manager::confirm_media_bulk_upload(state_copy, req).await {
             Ok(_) => {},
-            Err(error) => { println!("Error confirming media bulk upload: {:?}", error); },
+            Err(error) => { println!("Error confirming media bulk upload: {error:?}"); },
         }
     });
     (StatusCode::OK, "Thanks for sharing!".to_string())
@@ -142,10 +145,10 @@ pub async fn check_for_update(
 ) -> impl IntoResponse {
     let mut responses = Vec::with_capacity(input.iter().len());
 
-    for (deck_hash, update_info) in input.iter() {
+    for (deck_hash, update_info) in &input {
         if update_info.timestamp == "2022-12-31 23:59:59" {
             // Check if the result is already cached
-            let file_name = format!("{}.json", deck_hash);
+            let file_name = format!("{deck_hash}.json");
             let json_data = read_cached_json(&file_name);
 
             if let Some(data) = json_data {
@@ -201,7 +204,7 @@ pub async fn post_data(
     let commit_id = match suggestion::create_new_commit(&state, 1, &commit_text, &ip, Some(owner_id)).await {
         Ok(val) => val,
         Err(error) => {
-            println!("Error: {}", error);
+            println!("Error: {error}");
             return (StatusCode::OK, r#"{ "status": 0, "message": "An error occurred processing your request" }"#.to_string());
         }
     };
@@ -209,14 +212,14 @@ pub async fn post_data(
     let mut client: database::SharedConn = match state.db_pool.get_owned().await {
         Ok(pool) => pool,
         Err(err) => {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             return (StatusCode::OK, r#"{ "status": 0, "message": "Server Error. Please notify us! (752)" }"#.to_string());
         },
     };
 
     let deck_status = match push::check_deck_exists(&client, &anki_deck.name, &anki_deck.crowdanki_uuid, owner_id, None).await {
-        Ok(res) => format!(r#"{{ "status": 1, "message": "{}" }}"#, res),
-        Err(error) => r#"{ "status": 0, "message": "Deck does not exist" }"#.to_string(),
+        Ok(res) => format!(r#"{{ "status": 1, "message": "{res}" }}"#),
+        Err(_error) => r#"{ "status": 0, "message": "Deck already exists. Please submit suggestions instead." }"#.to_string(),
     };
 
     
@@ -225,11 +228,11 @@ pub async fn post_data(
         let mut notetype_cache = HashMap::new();
         match push::unpack_deck_json(&mut client, &anki_deck, &mut notetype_cache, owner_id, &ip, None, true, commit_id, &deck_tree).await {
             Ok(res) => {
-                println!("Success: {}", res);
-                format!(r#"{{ "status": 1, "message": "{}" }}"#, res)
+                println!("Success: {res}");
+                format!(r#"{{ "status": 1, "message": "{res}" }}"#)
             }
             Err(error) => {
-                println!("Error: {}", error);
+                println!("Error: {error}");
                 r#"{ "status": 0, "message": "An error occurred processing your request" }"#.to_string()
             }
         }
@@ -261,11 +264,10 @@ pub async fn request_removal(
 
     match note_removal::new(&db_state, info.note_guids, info.commit_text, info.remote_deck, ip, force_overwrite, committing_user).await {
         Ok(_res) => (StatusCode::OK, "Success".to_string()),
-        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, "Could not create removal request.".to_string()),
+        Err(_error) => (StatusCode::INTERNAL_SERVER_ERROR, "Could not create removal request.".to_string()),
     }
 }
 
-#[debug_handler]
 pub async fn process_card(
     InsecureClientIp(iip): InsecureClientIp,    
     State(state): State<Arc<AppState>>,
@@ -291,7 +293,7 @@ pub async fn process_card(
     
     let commit_id = match suggestion::create_new_commit(&state, info.rationale, &info.commit_text, &ip, committing_user).await {
         Ok(val) => val,
-        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Error occurred. Damn!".to_string()),
+        Err(_error) => return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Error occurred. Damn!".to_string()),
     };
 
     // Check if they are authorized to decide whether they want to force overwrite or not
@@ -304,7 +306,7 @@ pub async fn process_card(
 
     let deck_path = match suggestion::fix_deck_name(&state, &info.deck_path, &info.new_name, &info.remote_deck).await {
         Ok(val) => val,
-        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, "Invalid Deck Name".to_string()),
+        Err(_error) => return (StatusCode::INTERNAL_SERVER_ERROR, "Invalid Deck Name".to_string()),
     };
 
     for deck in &mut anki_deck.children {
@@ -314,7 +316,7 @@ pub async fn process_card(
     let mut client: database::SharedConn = match state.db_pool.get_owned().await {
         Ok(pool) => pool,
         Err(err) => {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             return (StatusCode::INTERNAL_SERVER_ERROR, r#"{ "status": 0, "message": "Server Error. Please notify us! (752)" }"#.to_string());
         },
     };
@@ -323,13 +325,13 @@ pub async fn process_card(
 
     match suggestion::sanity_check_notetypes(&client, &mut notetype_cache, & info.remote_deck, &anki_deck).await {
         Ok(_res) => (),
-        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Notetype Error: {}", error)),
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Notetype Error: {error}")),
     };
 
     let (deck_id, owner) = match suggestion::sanity_check(&client, &info.remote_deck, &deck_path, commit_id).await {
         Ok((deck_id, owner)) => (deck_id, owner),
         Err(error) => {
-            println!("Error getting pool: {}", error);
+            println!("Error getting pool: {error}");
             return (StatusCode::INTERNAL_SERVER_ERROR, r#"{ "status": 0, "message": "Error submitting your suggestion" }"#.to_string());
         },
     };
@@ -363,7 +365,7 @@ pub async fn process_card(
     match suggestion::make(&mut client, &info.remote_deck, &mut notetype_cache, &deck_path, &anki_deck, &ip, commit_id, force_overwrite, deck_id, owner, &deck_tree).await {
         Ok(_res) => (StatusCode::OK, "Success".to_string()),
         Err(error) => { 
-            println!("Error occurred in make suggestion: {}", error); 
+            println!("Error occurred in make suggestion: {error}"); 
             (StatusCode::INTERNAL_SERVER_ERROR, r#"{ "status": 0, "message": "Error submitting your suggestion" }"#.to_string())
         },
     }
@@ -381,7 +383,7 @@ pub async fn check_deck_alive(
             (StatusCode::OK, json)
         },
         Err(error) => {
-            println!("Error occurred: {}", error);
+            println!("Error occurred: {error}");
             (StatusCode::INTERNAL_SERVER_ERROR, "Error".to_string())
         },
     }
@@ -419,9 +421,9 @@ pub async fn get_deck_timestamp(
     Path(deck_hash): Path<String>,
 ) -> impl IntoResponse {
     match pull::get_deck_last_update_unix(&db_state, &deck_hash).await {
-        Ok(res) => (StatusCode::OK, format!("{}", res)),
+        Ok(res) => (StatusCode::OK, format!("{res}")),
         Err(error) => {
-            println!("Error retrieving deck timestamp: {}", error);
+            println!("Error retrieving deck timestamp: {error}");
             (StatusCode::INTERNAL_SERVER_ERROR, "0.0".to_string())
         },
     }
@@ -432,7 +434,7 @@ pub async fn get_large_decks(State(db_state): State<Arc<AppState>>) -> impl Into
     let client: database::SharedConn = match db_state.db_pool.get_owned().await {
         Ok(pool) => pool,
         Err(err) => {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             return (StatusCode::INTERNAL_SERVER_ERROR, "[]".to_string());
         },
     };
@@ -505,7 +507,7 @@ pub async fn refresh_auth_token(
             (StatusCode::OK, json)
         },
         Err(error) => {
-            println!("Error occurred: {}", error);
+            println!("Error occurred: {error}");
             (StatusCode::INTERNAL_SERVER_ERROR, "Error".to_string())
         },
     }
@@ -516,7 +518,7 @@ async fn get_protected_fields_from_deck(
     Path(deck_hash): Path<String>,
 ) -> impl IntoResponse {
     let client = db_state.db_pool.get_owned().await.map_err(|e| {
-        println!("Error getting pool: {}", e);
+        println!("Error getting pool: {e}");
         (StatusCode::INTERNAL_SERVER_ERROR, "Error".to_string())
     }).unwrap();
     let quer = notetypes::pull_protected_fields(&client, &deck_hash).await.unwrap_or_default();
@@ -526,7 +528,7 @@ async fn get_protected_fields_from_deck(
 fn media_routes() -> Router<Arc<AppState>> {
     let media_api_ratelimit:u32 = std::env::var("MEDIA_API_RATE_LIMIT_PER_MINUTE").expect("MEDIA_API_RATE_LIMIT_PER_MINUTE must be set").parse().expect("Rate limit must be a valid number");
     let media_governor_conf = Arc::new(GovernorConfigBuilder::default()
-        .per_second((media_api_ratelimit as f64 / 60.0) as u64)
+        .per_second((f64::from(media_api_ratelimit) / 60.0) as u64)
         .burst_size(media_api_ratelimit / 2)
         .key_extractor(SmartIpKeyExtractor)
         .finish()
@@ -628,10 +630,29 @@ async fn main() {
         rate_limiter,
     });
 
+    
+    let is_dry_run = true; // <-- CHANGE TO false TO ENABLE DELETION
+    println!("Starting cleanup job wrapper...");
+    match media_manager::cleanup_orphaned_media_s3(state.clone(), is_dry_run).await {
+        Ok(deleted_count) => {
+            if is_dry_run {
+                 println!("[DRY RUN] Orphaned media cleanup simulation completed successfully.");
+            } else {
+                println!("Orphaned media cleanup completed successfully. Deleted {deleted_count} objects.");
+            }
+        }
+        Err(e) => {
+            println!("Orphaned media cleanup job failed: {e:?}");
+            // Implement alerting or specific failure handling here
+            // e.g., send notification to admin, increment metrics counter
+        }
+    }
+    println!("Cleanup job wrapper finished.");
+
     // IP RAte limiter 
     let global_api_ratelimit:u32 = std::env::var("STANDARD_API_RATE_LIMIT_PER_MINUTE").expect("STANDARD_API_RATE_LIMIT_PER_MINUTE must be set").parse().expect("Rate limit must be a valid number");
     let global_governor_conf = Arc::new(GovernorConfigBuilder::default()
-            .per_second((global_api_ratelimit as f64 / 60.0) as u64)
+            .per_second((f64::from(global_api_ratelimit) / 60.0) as u64)
             .burst_size(global_api_ratelimit / 2)
             .key_extractor(SmartIpKeyExtractor)
             .finish()
@@ -657,10 +678,10 @@ async fn main() {
             match auth::cleanup_expired_tokens(&cleanup_state).await {
                 Ok(count) => {
                     if count > 0 {
-                        println!("Cleaned up {} expired tokens", count);
+                        println!("Cleaned up {count} expired tokens");
                     }
                 },
-                Err(e) => println!("Error cleaning up tokens: {}", e),
+                Err(e) => println!("Error cleaning up tokens: {e}"),
             }
         }
     });
@@ -715,14 +736,14 @@ async fn main() {
             config: global_governor_conf,
         })
         .with_state(state)
-        //.layer(axum::extract::DefaultBodyLimit::disable())
+        .layer(axum::extract::DefaultBodyLimit::disable())
         .layer((
             TraceLayer::new_for_http(),
             // Graceful shutdown will wait for outstanding requests to complete. Add a timeout so
             // requests don't hang forever. Causes issues for streaming large decks that take more than 10secs to generate. hence i disabled it
             //TimeoutLayer::new(Duration::from_secs(10)),
         ))
-        .layer(SecureClientIpSource::ConnectInfo.into_extension());
+        .layer(SecureClientIpSource::CfConnectingIp.into_extension());
 
     // run it
     let listener = tokio::net::TcpListener::bind("localhost:5555").await.unwrap();
@@ -752,7 +773,7 @@ async fn shutdown_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
+        () = ctrl_c => {},
+        () = terminate => {},
     }
 }

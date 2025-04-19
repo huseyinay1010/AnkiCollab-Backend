@@ -43,11 +43,15 @@ pub struct Notetype {
     pub crowdanki_uuid: String,
     pub css: String,
     pub flds: Vec<NotetypeField>,
-    pub latexPost: String,
-    pub latexPre: String,
-    pub latexsvg: bool,
+    #[serde(rename = "latexPost")]
+    pub latex_post: String,
+    #[serde(rename = "latexPre")]
+    pub latex_pre: String,
+    #[serde(rename = "latexsvg")]
+    pub latex_svg: bool,
     pub name: String,
-    pub originalStockKind: Option<i32>,
+    #[serde(rename = "originalStockKind")]
+    pub original_stock_kind: Option<i32>,
     pub req: Vec<CardRequirement>,
     pub sortf: i32,
     pub tmpls: Vec<NotetypeTemplate>,
@@ -76,7 +80,7 @@ pub struct AnkiDeck {
 }
 
 impl AnkiDeck {
-    pub fn from_json_string(json_string: &str) -> Result<AnkiDeck, serde_json::Error> {
+    pub fn from_json_string(json_string: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json_string)
     }
 }

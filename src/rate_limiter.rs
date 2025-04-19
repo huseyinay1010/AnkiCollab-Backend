@@ -1,9 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
-use axum::{
-    extract::State,
-    http::StatusCode,
-};
+use axum::http::StatusCode;
 use tokio::sync::Mutex;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -70,13 +67,13 @@ pub struct RateLimiter {
 }
 
 impl StorageMonitor {
-    pub fn new(current_bucket_size: u64, max_bytes: u64) -> Self {
+    #[must_use] pub fn new(current_bucket_size: u64, max_bytes: u64) -> Self {
         // Get largest threshold that is already passed
         let thresholds = [10, 25, 50, 75, 80, 90, 95, 98];
         let curr_perc = current_bucket_size as f64 / max_bytes as f64 * 100.0;
         let enabled = curr_perc < 100.0;
         let mut last_passed = 0;
-        for threshold in thresholds.iter() {
+        for threshold in &thresholds {
             if curr_perc >= *threshold as f64 {
                 last_passed = *threshold;
             }
@@ -89,12 +86,12 @@ impl StorageMonitor {
             last_logged_percent: Arc::new(AtomicU64::new(last_passed)),
         };
         
-        println!("Storage monitor initialized with capacity of {} bytes", max_bytes);
+        println!("Storage monitor initialized with capacity of {max_bytes} bytes");
         monitor
     }
     
     /// Check if a storage operation of the given size is allowed
-    pub fn check_operation(&self, bytes: u64) -> bool {
+    #[must_use] pub fn check_operation(&self, bytes: u64) -> bool {
         if !self.enabled.load(Ordering::Relaxed) {
             println!("Storage monitor disabled - rejecting operation");
             return false;
@@ -115,10 +112,10 @@ impl StorageMonitor {
         let last_logged = self.last_logged_percent.load(Ordering::Relaxed);
         
         let thresholds = [10, 25, 50, 75, 80, 90, 95, 98];
-        for threshold in thresholds.iter() {
+        for threshold in &thresholds {
             if percent_used >= *threshold && last_logged < *threshold {
                 self.last_logged_percent.store(*threshold, Ordering::Relaxed);                                
-                println!("STORAGE ALERT: Usage at {}%", threshold);                
+                println!("STORAGE ALERT: Usage at {threshold}%");                
                 break;
             }
         }
@@ -132,7 +129,7 @@ impl StorageMonitor {
     }
     
     /// Get current usage statistics
-    pub fn get_usage(&self) -> (u64, u64, bool, f64) {
+    #[must_use] pub fn get_usage(&self) -> (u64, u64, bool, f64) {
         let current = self.current_bytes.load(Ordering::Relaxed);
         let max = self.max_bytes;
         let enabled = self.enabled.load(Ordering::Relaxed);
@@ -143,7 +140,7 @@ impl StorageMonitor {
 
 impl RateLimiter {
     /// Create a new rate limiter with default settings
-    pub fn new(db: DbConn, current_bucket_size: u64) -> Self {
+    #[must_use] pub fn new(db: DbConn, current_bucket_size: u64) -> Self {
         let max_storage_bytes = std::env::var("MAX_STORAGE_BYTES")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -157,7 +154,7 @@ impl RateLimiter {
             operation_count: Arc::new(AtomicU64::new(0)),
             operation_reset_time: Arc::new(Mutex::new(Utc::now())),
             user_quotas: Arc::new(Mutex::new(HashMap::new())),
-            db_conn: db.clone(),
+            db_conn: db,
         };
         
         limiter.start_background_tasks();
@@ -196,7 +193,7 @@ impl RateLimiter {
 
     pub async fn load_user_quotas(&self) -> Result<(), tokio_postgres::Error> {
         let db_client = self.db_conn.get().await.map_err(|err| {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             (StatusCode::INTERNAL_SERVER_ERROR, "Internal Error".to_string())
         }).unwrap();
         
@@ -249,7 +246,7 @@ impl RateLimiter {
                 if now.month() != reset_time.month() || now.year() != reset_time.year() {
                     operation_count.store(0, Ordering::Relaxed);
                     *reset_time = now;
-                    println!("Monthly operation counter reset at {}", now);
+                    println!("Monthly operation counter reset at {now}");
                 }
             }
         });
@@ -264,9 +261,8 @@ impl RateLimiter {
                 let (current, max, enabled, percent) = storage_monitor.get_usage();
                 let ops_count = operation_count.load(Ordering::Relaxed);
                 
-                println!("Storage metrics: {}/{} bytes ({:.1}%) - Enabled: {}", 
-                     current, max, percent, enabled);
-                println!("Operations this month: {}/{}", ops_count, MAX_MONTHLY_OPERATIONS);
+                println!("Storage metrics: {current}/{max} bytes ({percent:.1}%) - Enabled: {enabled}");
+                println!("Operations this month: {ops_count}/{MAX_MONTHLY_OPERATIONS}");
             }
         });
 
@@ -280,11 +276,11 @@ impl RateLimiter {
                 match rate_limiter.db_conn.get_owned().await {
                     Ok(mut client) => {
                         if let Err(err) = rate_limiter.persist_user_quotas(&mut client).await {
-                            println!("Failed to persist user quotas: {}", err);
+                            println!("Failed to persist user quotas: {err}");
                         }
                     },
                     Err(err) => {
-                        println!("Failed to get database connection for quota persistence: {}", err);
+                        println!("Failed to get database connection for quota persistence: {err}");
                     }
                 }
             }
@@ -292,7 +288,7 @@ impl RateLimiter {
     }
 
     /// Get the storage monitor
-    pub fn storage_monitor(&self) -> Arc<StorageMonitor> {
+    #[must_use] pub fn storage_monitor(&self) -> Arc<StorageMonitor> {
         self.storage_monitor.clone()
     }
     
@@ -372,8 +368,7 @@ impl RateLimiter {
     fn check_global_operation(&self) -> bool {
         let ops_count = self.operation_count.fetch_add(1, Ordering::Relaxed);
         if ops_count >= MAX_MONTHLY_OPERATIONS {
-            println!("Monthly operation limit exceeded: {}/{}", 
-                  ops_count, MAX_MONTHLY_OPERATIONS);
+            println!("Monthly operation limit exceeded: {ops_count}/{MAX_MONTHLY_OPERATIONS}");
             return false;
         }
         true
@@ -469,7 +464,7 @@ impl RateLimiter {
             quota.storage_used.fetch_add(bytes, Ordering::Relaxed);
 
             // Increment counters
-            quota.upload_count.fetch_add(file_count as u32, Ordering::Relaxed);
+            quota.upload_count.fetch_add(file_count, Ordering::Relaxed);
         }
 
         // add ip tracking

@@ -16,17 +16,13 @@ use tokio::time;
 use uuid::Uuid;
 
 use md5::{Md5, Digest};
-use futures::stream::StreamExt;
 use std::collections::{HashSet, HashMap};
 use tokio::io::AsyncReadExt;
 use bytes::BytesMut;
-use crate::structs::*;
+use crate::structs::{MediaBulkCheckRequest, MediaBulkCheckResponse, MediaBulkConfirmRequest, MediaBulkConfirmResponse, MediaDownloadItem, MediaExistingFile, MediaManifestRequest, MediaManifestResponse, MediaMissingFile, MediaProcessedFile, SanitizedSvgItem, SvgSanitizeRequest, SvgSanitizeResponse};
 use crate::{auth, AppState};
 use crate::media_logger::{self, MediaOperationType};
 
-use bb8_postgres::bb8::PooledConnection;
-use bb8_postgres::PostgresConnectionManager;
-type SharedConn = PooledConnection<'static, PostgresConnectionManager<tokio_postgres::NoTls>>;
 use lazy_static::lazy_static;
 use std::env::var;
 
@@ -121,13 +117,14 @@ pub async fn cleanup_orphaned_media_s3(
 ) -> Result<usize, (StatusCode, String)> {
     let db_hashes = {
         let conn = state.db_pool.get().await.map_err(|err| {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             (StatusCode::INTERNAL_SERVER_ERROR, "Error getting database connection".to_string())
         })?;
         
         let rows = conn
             .query("SELECT hash FROM media_files", &[])
             .await.map_err(|err| {
+                println!("Error querying database: {err}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
             })?;
 
@@ -213,10 +210,10 @@ pub async fn cleanup_orphaned_media_s3(
         orphaned_s3_keys.len(),
     );
     if invalid_key_format_count > 0 {
-        println!("Skipped {} keys due to invalid format.", invalid_key_format_count);
+        println!("Skipped {invalid_key_format_count} keys due to invalid format.");
     }
     if prefix_mismatch_count > 0 {
-        println!("Skipped {} keys due to prefix/hash mismatch.", prefix_mismatch_count);
+        println!("Skipped {prefix_mismatch_count} keys due to prefix/hash mismatch.");
     }
 
     if orphaned_s3_keys.is_empty() {
@@ -265,7 +262,7 @@ pub async fn cleanup_orphaned_media_s3(
                 Ok(output) => {
                     if let Some(deleted_objects) = output.deleted {
                         let batch_deleted_count = deleted_objects.len();
-                        println!("Successfully deleted batch of {} objects.", batch_deleted_count);
+                        println!("Successfully deleted batch of {batch_deleted_count} objects.");
                         total_deleted_count += batch_deleted_count;
                     }
                     if let Some(errors) = output.errors {
@@ -284,16 +281,16 @@ pub async fn cleanup_orphaned_media_s3(
                 Err(err) => {
                     // Error sending the entire batch delete request
                     deletion_had_errors = true;
-                    println!("Failed to send batch delete request: {}", err);
+                    println!("Failed to send batch delete request: {err}");
                 }
             }
         } // end batch deletion loop
 
-        println!("Orphan cleanup finished. Total objects deleted: {}", total_deleted_count);
+        println!("Orphan cleanup finished. Total objects deleted: {total_deleted_count}");
 
         // Return an error if any part of the deletion failed
         if deletion_had_errors {
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Error during deletion".to_string()));
+            Err((StatusCode::INTERNAL_SERVER_ERROR, "Error during deletion".to_string()))
         } else {
             Ok(total_deleted_count)
         }
@@ -305,12 +302,12 @@ pub async fn cleanup_orphaned_media(state: Arc<AppState>) -> Result<(), (StatusC
     //info!("Starting orphaned media cleanup job");
 
     let mut db_client = state.db_pool.get().await.map_err(|err| {
-        println!("Error getting pool: {}", err);
+        println!("Error getting pool: {err}");
         (StatusCode::INTERNAL_SERVER_ERROR, "Error getting database connection".to_string())
     })?;
 
     let tx = db_client.transaction().await.map_err(|err| {
-        println!("Error starting transaction: {}", err);
+        println!("Error starting transaction: {err}");
         (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
     })?;
 
@@ -320,6 +317,7 @@ pub async fn cleanup_orphaned_media(state: Arc<AppState>) -> Result<(), (StatusC
          WHERE NOT EXISTS (SELECT 1 FROM media_references r WHERE r.media_id = m.id)",
         &[]
     ).await.map_err(|err| {
+        println!("Error querying database: {err}");
         (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
     })?;
     
@@ -330,7 +328,7 @@ pub async fn cleanup_orphaned_media(state: Arc<AppState>) -> Result<(), (StatusC
         let hash: String = row.get(1);
         
         let prefix = &hash[0..2];
-        let s3_key = format!("{}/{}", prefix, hash);
+        let s3_key = format!("{prefix}/{hash}");
         
         // Delete from S3
         match state.s3_client.delete_object()
@@ -342,19 +340,19 @@ pub async fn cleanup_orphaned_media(state: Arc<AppState>) -> Result<(), (StatusC
             Ok(_) => {
                 // Delete from database
                 if let Err(e) = tx.execute("DELETE FROM media_files WHERE id = $1", &[&id]).await {
-                    println!("Failed to delete media file {} from database: {}", hash, e);
+                    println!("Failed to delete media file {hash} from database: {e}");
                     continue;
                 }                
             },
             Err(e) => {
-                println!("Failed to delete media file {} from S3: {}", hash, e);
+                println!("Failed to delete media file {hash} from S3: {e}");
                 continue;
             }
         }
     }
 
     tx.commit().await.map_err(|err| {
-        println!("Error committing transaction: {}", err);
+        println!("Error committing transaction: {err}");
         (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
     })?;
     
@@ -374,7 +372,7 @@ pub async fn start_cleanup_task(state: Arc<AppState>) {
             interval.tick().await;
             
             if let Err(e) = cleanup_orphaned_media(orphan_clone.clone()).await {
-                println!("Media cleanup task failed: {:?}", e);
+                println!("Media cleanup task failed: {e:?}");
             }
         }
     });
@@ -382,7 +380,7 @@ pub async fn start_cleanup_task(state: Arc<AppState>) {
     //info!("Media cleanup task scheduled");
 
     // Add bulk upload cleanup
-    let bulk_state = state.clone();
+    let bulk_state = state;
     tokio::spawn(async move {
         let mut interval = time::interval(tokio::time::Duration::from_secs(3600 * 24)); // 24 hour
         
@@ -453,7 +451,7 @@ pub async fn start_cleanup_task(state: Arc<AppState>) {
                             // Delete the files from S3
                             for hash in files_to_delete {
                                 let prefix = &hash[0..2];
-                                let s3_key = format!("{}/{}", prefix, hash);
+                                let s3_key = format!("{prefix}/{hash}");
                                 let _ = bulk_state.s3_client.delete_object()
                                     .bucket(MEDIA_BUCKET.as_str())
                                     .key(&s3_key)
@@ -464,7 +462,7 @@ pub async fn start_cleanup_task(state: Arc<AppState>) {
                         }
                     },
                     Err(e) => {
-                        println!("Error cleaning up expired bulk uploads: {}", e);
+                        println!("Error cleaning up expired bulk uploads: {e}");
                     }
                 }
             }
@@ -509,12 +507,12 @@ pub async fn check_media_bulk(
     }
    
     let mut db_client = state.db_pool.get().await.map_err(|err| {
-        println!("Error getting pool: {}", err);
+        println!("Error getting pool: {err}");
         (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
     })?;
 
     let tx = db_client.transaction().await.map_err(|err| {
-        println!("Error starting transaction: {}", err);
+        println!("Error starting transaction: {err}");
         (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
     })?;
 
@@ -536,7 +534,7 @@ pub async fn check_media_bulk(
         WHERE n.deleted = false AND n.guid = ANY($2)",
         &[&req.deck_hash, &note_guids]
     ).await.map_err(|err| {
-        println!("Error querying notes: {}", err);
+        println!("Error querying notes: {err}");
         (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
     })?;
 
@@ -556,7 +554,7 @@ pub async fn check_media_bulk(
         "SELECT id, hash FROM media_files WHERE hash = ANY($1)",
         &[&hashes]
     ).await.map_err(|err| {
-        println!("Error querying database: {}", err);
+        println!("Error querying database: {err}");
         (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
     })?;
 
@@ -583,7 +581,7 @@ pub async fn check_media_bulk(
                      ON CONFLICT (media_id, note_id) DO NOTHING",
                     &[media_id, note_id, &file.filename]
                 ).await.map_err(|err| {
-                    println!("Error inserting reference: {}", err);
+                    println!("Error inserting reference: {err}");
                     (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
                 })?;
             }
@@ -624,13 +622,10 @@ pub async fn check_media_bulk(
                 media_id,
             });
         } else {
-            let note_id = match note_id_map.get(&file.note_guid) {
-                Some(nid) => nid,
-                None => {
-                    invalid_hash_set.insert(file.hash.clone());
-                    //println!("Note ID not found for file: {}", file.filename);
-                    continue; // Skip if note ID is not found
-                }
+            let note_id = if let Some(nid) = note_id_map.get(&file.note_guid) { nid } else {
+                invalid_hash_set.insert(file.hash.clone());
+                //println!("Note ID not found for file: {}", file.filename);
+                continue; // Skip if note ID is not found
             };
 
             if file.file_size <= 0 || file.file_size > MAX_FILE_SIZE_BYTES as i64 {
@@ -639,13 +634,10 @@ pub async fn check_media_bulk(
                 continue; // Skip if file size is invalid
             }        
 
-            let file_content_type = match determine_content_type_by_name(&file.filename) {
-                Some(content_type) => content_type,
-                None => {
-                    invalid_hash_set.insert(file.hash.clone());
-                    //println!("Invalid file content type for file: {}", file.filename);
-                    continue; // Skip if content type is invalid
-                }
+            let file_content_type = if let Some(content_type) = determine_content_type_by_name(&file.filename) { content_type } else {
+                invalid_hash_set.insert(file.hash.clone());
+                //println!("Invalid file content type for file: {}", file.filename);
+                continue; // Skip if content type is invalid
             };
 
             // Create the file location in S3
@@ -714,7 +706,7 @@ pub async fn check_media_bulk(
         
         // Convert to JSON
         let batch_metadata = serde_json::to_value(&missing_files_response).map_err(|err| {
-            println!("Error serializing metadata: {}", err);
+            println!("Error serializing metadata: {err}");
             (StatusCode::INTERNAL_SERVER_ERROR, "Error processing request".to_string())
         })?;
         
@@ -723,7 +715,7 @@ pub async fn check_media_bulk(
             "INSERT INTO media_bulk_uploads (id, metadata, created_at) VALUES ($1, $2, NOW())",
             &[&batch_id, &batch_metadata]
         ).await.map_err(|err| {
-            println!("Error storing bulk upload metadata: {}", err);
+            println!("Error storing bulk upload metadata: {err}");
             (StatusCode::INTERNAL_SERVER_ERROR, "Error storing upload metadata".to_string())
         })?;
     }
@@ -764,7 +756,7 @@ pub async fn confirm_media_bulk_upload(
 
     let files: Vec<MediaMissingFile> = {
         let db_client = state.db_pool.get().await.map_err(|err| {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
         })?;
 
@@ -773,7 +765,7 @@ pub async fn confirm_media_bulk_upload(
             "SELECT metadata FROM media_bulk_uploads WHERE id = $1",
             &[&batch_id_uuid]
         ).await.map_err(|err| {
-            println!("Error querying database: {}", err);
+            println!("Error querying database: {err}");
             (StatusCode::INTERNAL_SERVER_ERROR, "Error retrieving upload metadata".to_string())
         })?;
 
@@ -783,7 +775,7 @@ pub async fn confirm_media_bulk_upload(
         };
 
         serde_json::from_value(metadata_json).map_err(|err| {
-            println!("Error parsing metadata: {}", err);
+            println!("Error parsing metadata: {err}");
             (StatusCode::INTERNAL_SERVER_ERROR, "Error parsing upload metadata".to_string())
         })?
     };
@@ -809,7 +801,7 @@ pub async fn confirm_media_bulk_upload(
              HashSet::new()
         } else {
              let db_client = state.db_pool.get().await.map_err(|err| {
-                println!("Error getting pool: {}", err);
+                println!("Error getting pool: {err}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
             })?;
 
@@ -818,7 +810,7 @@ pub async fn confirm_media_bulk_upload(
             "SELECT id FROM notes WHERE id = ANY($1) AND deleted = false",
             &[&note_ids]
             ).await.map_err(|err| {
-                println!("Error querying database: {}", err);
+                println!("Error querying database: {err}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
             })?;
 
@@ -936,7 +928,7 @@ pub async fn confirm_media_bulk_upload(
                                 hash: file.hash.clone(),
                                 media_id: 0i64,
                                 success: false,
-                                error: Some(format!("Error retrieving file: {}", e)),
+                                error: Some(format!("Error retrieving file: {e}")),
                             });
                         }
                     }
@@ -947,7 +939,7 @@ pub async fn confirm_media_bulk_upload(
                         hash: file.hash.clone(),
                         media_id: 0i64,
                         success: false,
-                        error: Some(format!("File not found: {}", e)),
+                        error: Some(format!("File not found: {e}")),
                     });
                 }
             }
@@ -969,12 +961,12 @@ pub async fn confirm_media_bulk_upload(
 
     if !files_to_insert_in_db.is_empty() {
         let mut db_client = state.db_pool.get().await.map_err(|err| {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
         })?;
 
         let tx = db_client.transaction().await.map_err(|err| {
-            println!("Error starting transaction: {}", err);
+            println!("Error starting transaction: {err}");
             (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
         })?;
 
@@ -1015,7 +1007,7 @@ pub async fn confirm_media_bulk_upload(
                                 hash: file_to_insert.hash.clone(),
                                 media_id, // Keep media_id as file was inserted
                                 success: false, // Overall operation for this file failed at reference step
-                                error: Some(format!("Error creating reference: {}", e)),
+                                error: Some(format!("Error creating reference: {e}")),
                             });
                         }
                     }
@@ -1026,7 +1018,7 @@ pub async fn confirm_media_bulk_upload(
                         hash: file_to_insert.hash.clone(),
                         media_id: 0i64,
                         success: false,
-                        error: Some(format!("Error inserting media file: {}", e)),
+                        error: Some(format!("Error inserting media file: {e}")),
                     });
                 }
             }
@@ -1038,7 +1030,7 @@ pub async fn confirm_media_bulk_upload(
         ).await;
 
         tx.commit().await.map_err(|err| {
-            println!("Error committing transaction: {}", err);
+            println!("Error committing transaction: {err}");
             (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
         })?;
     }
@@ -1051,7 +1043,7 @@ pub async fn confirm_media_bulk_upload(
     }))
 }
 
-use svg_hush::*;
+use svg_hush::{Filter, data_url_filter};
 fn sanitize_svg(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     if data.len() > MAX_FILE_SIZE_BYTES || data.len() < 10 {
@@ -1101,9 +1093,9 @@ async fn validate_media_stream(
     let mut reader = byte_stream.into_async_read();
     let mut buffer = [0u8; 8192];
     let mut hasher = Md5::new();
-    let mut total_size: u64 = 0;
-    let mut content_type = None;
-    let mut is_valid = false;
+    let mut total_size: u64;
+    let content_type:Option<String>;
+    let mut is_valid;
     let mut signature_buffer = BytesMut::with_capacity(SIGNATURE_CHECK_BYTES);
     let mut svg_content = Vec::new();
     
@@ -1289,12 +1281,12 @@ fn is_allowed_extension(filename: &str) -> bool {
     }
 
     // Name must start with a letter or number (to avoid leading dots/spaces)
-    if !filename.chars().next().map_or(false, |c| c.is_alphanumeric()) {
+    if !filename.chars().next().map_or(false, char::is_alphanumeric) {
         return false;
     }
     
     // Name must contain at least one letter or number (to avoid only dots/spaces)
-    if !filename.chars().any(|c| c.is_alphanumeric()) {
+    if !filename.chars().any(char::is_alphanumeric) {
         return false;
     }
 
@@ -1338,7 +1330,7 @@ pub async fn get_media_manifest(
     let ip_address = client_ip.0;
 
     let db_client = state.db_pool.get_owned().await.map_err(|err| {
-        println!("Error getting pool: {}", err);
+        println!("Error getting pool: {err}");
         (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
     })?;
 
@@ -1360,14 +1352,9 @@ pub async fn get_media_manifest(
             ";
 
     let media_rows = db_client.query(media_query, &[&req.deck_hash, &req.filenames]).await.map_err(|err| {
-        println!("Error querying media files: {}", err);
+        println!("Error querying media files: {err}");
         (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
     })?;
-
-    // Calculate total size for download tracking
-    let total_size: i64 = media_rows.iter()
-        .map(|row| row.get::<_, i64>(2))
-        .sum();
 
     // Create the manifest data
     let now = Utc::now();
@@ -1378,7 +1365,7 @@ pub async fn get_media_manifest(
 
     // Check download limits for this IP using actual size
     if !state.rate_limiter.check_user_download_allowed(user_id, ip_address, length_vec).await {
-        println!("Download limit exceeded for {:?}", client_ip);
+        println!("Download limit exceeded for {client_ip:?}");
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
             "Download limit exceeded. Please try again tomorrow.".to_string()
@@ -1391,7 +1378,7 @@ pub async fn get_media_manifest(
         let filename: String = row.get(1);
 
         let prefix = &hash[0..2];
-        let s3_key = format!("{}/{}", prefix, hash);
+        let s3_key = format!("{prefix}/{hash}");
         
         // Generate a presigned URL for each file
         let presigned_req = state.s3_client.get_object()
@@ -1401,7 +1388,7 @@ pub async fn get_media_manifest(
                 PresigningConfig::expires_in(std::time::Duration::from_secs(PRESIGNED_URL_EXPIRATION * 60)).unwrap()
             )
             .await.map_err(|err| {
-                println!("Error generating presigned URL for {}: {}", hash, err);
+                println!("Error generating presigned URL for {hash}: {err}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "Error generating download link".to_string())
             })?;
         
@@ -1432,11 +1419,11 @@ pub async fn sanitize_svg_batch(
     
     // Limit batch size
     const MAX_BATCH_SIZE: usize = 250;
-    const MAX_TOTAL_SIZE: usize = 1 * 1024 * 1024; // 1 MB total batch size
+    const MAX_TOTAL_SIZE: usize = 1024 * 1024; // 1 MB total batch size
     
     if req.svg_files.len() > MAX_BATCH_SIZE {
         return Err((StatusCode::BAD_REQUEST, 
-                   format!("Too many files in single request")));
+                   "Too many files in single request".to_string()));
     }
     
     // Calculate total size
@@ -1446,7 +1433,7 @@ pub async fn sanitize_svg_batch(
         
     if total_size > MAX_TOTAL_SIZE {
         return Err((StatusCode::BAD_REQUEST, 
-                   format!("Total batch size too large")));
+                   "Total batch size too large".to_string()));
     }
     
     let mut sanitized_files = Vec::with_capacity(req.svg_files.len());

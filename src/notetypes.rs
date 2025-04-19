@@ -1,7 +1,7 @@
 
 
 
-use crate::{database, structs::*};
+use crate::{cleanser, database, structs::{CardRequirement, Note, NoteModel, NoteModelFieldInfo, Notetype, NotetypeField, NotetypeTemplate}};
 use std::collections::HashSet;
 
 use database::SharedConn;
@@ -28,17 +28,7 @@ pub async fn get_notetype_fields(client: &SharedConn, notetype_id: i64) -> Vec<N
         let id: Option<i64> = row.get(7);
         let tag: Option<i32> = row.get(8);
 
-        fields.push(NotetypeField {
-            description,
-            font,
-            name,
-            ord,
-            rtl,
-            size,
-            sticky,
-            id,
-            tag,
-        });
+        fields.push(NotetypeField { description, font, id, name, ord, rtl, size, sticky, tag });
     }
     fields
 }
@@ -62,17 +52,7 @@ pub async fn get_notetype_templates(client: &SharedConn, notetype_id: i64) -> Ve
         let id: Option<i64> = row.get(7);
         let ord: i32 = row.get(8);
 
-        templates.push(NotetypeTemplate {
-            afmt,
-            bafmt,
-            bfont,
-            bqfmt,
-            bsize,
-            name,
-            ord,
-            qfmt,
-            id,
-        });
+        templates.push(NotetypeTemplate { afmt, bafmt, bfont, bqfmt, bsize, id, name, ord, qfmt });
     }
     templates
 }
@@ -86,7 +66,7 @@ pub async fn get_notetypes(client: &SharedConn, notes: &Vec<Note>, owner: i32) -
         notetype_guids.insert(note.note_model_uuid.clone());
     }
 
-    let notetype_guids_vec: Vec<&str> = notetype_guids.iter().map(|guid| guid.as_str()).collect();
+    let notetype_guids_vec: Vec<&str> = notetype_guids.iter().map(std::string::String::as_str).collect();
 
     let stmt = client
         .prepare("
@@ -128,13 +108,13 @@ pub async fn get_notetypes(client: &SharedConn, notes: &Vec<Note>, owner: i32) -
             crowdanki_uuid: guid,
             css,
             flds: get_notetype_fields(client, id).await,
-            latexPost: latex_post,
-            latexPre: latex_pre,
-            latexsvg: latex_svg,
+            latex_post,
+            latex_pre,
+            latex_svg,
             name,
             tmpls: get_notetype_templates(client, id).await,
             type_,
-            originalStockKind: original_stock_kind,
+            original_stock_kind,
             req,
             sortf,
         });
@@ -184,7 +164,7 @@ pub async fn pull_protected_fields(client: &SharedConn, human_hash: &String) -> 
             current_note_model = NoteModel {
                 id: notetype_id,
                 fields: Vec::new(),
-                name: notetype_name.to_owned(),
+                name: notetype_name.clone(),
             };
         } 
         current_note_model.fields.push(NoteModelFieldInfo {
@@ -216,9 +196,8 @@ pub async fn does_notetype_exist(client: &SharedConn, notetype: &Notetype, owner
     let req_json = serde_json::to_string(&notetype.req)?;
     let check_existing_notetype = client.query("SELECT id, guid, original_stock_kind from notetype where owner = $1 and type = $2 and req = $3", &[&owner, &notetype.type_, &req_json]).await?;
 
-    let mut matching_field_guid = None;
     for row in check_existing_notetype {
-        if !notetype.originalStockKind.zip(row.get::<_, Option<i32>>(2)).map_or(true, |(a, b)| a == b){
+        if !notetype.original_stock_kind.zip(row.get::<_, Option<i32>>(2)).map_or(true, |(a, b)| a == b){
             continue;
         }
 
@@ -251,10 +230,6 @@ pub async fn does_notetype_exist(client: &SharedConn, notetype: &Notetype, owner
             })
         });
 
-        if matching_fields {
-            matching_field_guid = Some(existing_notetype_guid.clone());
-        }
-
         // Try to find a notetype that is exactly the same, (Best case)
         if matching_fields && matching_templates {
             return Ok(existing_notetype_guid);
@@ -273,7 +248,7 @@ pub async fn does_notetype_exist(client: &SharedConn, notetype: &Notetype, owner
         }
     }
     // Give up
-    Ok("".into())
+    Ok(String::new())
 }
 
 
@@ -313,17 +288,19 @@ pub async fn unpack_notetype(client: &mut SharedConn, notetype: &Notetype, deck:
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
     ").await?;
 
-    let original_stock_kind = notetype.originalStockKind.unwrap_or(0);
+    let original_stock_kind = notetype.original_stock_kind.unwrap_or(0);
+
+    let cleaned_notetype_name = cleanser::clean(&notetype.name);
 
     let req_json = serde_json::to_string(&notetype.req)?;
     let rows = tx.query(&insert_notetype_stmt, &[
         &notetype.crowdanki_uuid,
         &owner,
         &notetype.css,
-        &notetype.latexPost,
-        &notetype.latexPre,
-        &notetype.latexsvg,
-        &notetype.name,
+        &notetype.latex_post,
+        &notetype.latex_pre,
+        &notetype.latex_svg,
+        &cleaned_notetype_name,
         &notetype.type_,
         &original_stock_kind,
         &notetype.sortf,
@@ -337,12 +314,13 @@ pub async fn unpack_notetype(client: &mut SharedConn, notetype: &Notetype, deck:
         let anki_id = field.id.unwrap_or(0);
         let tag = field.tag.unwrap_or(0);
         let cleaned_field_description = ammonia::clean(&field.description);
+        let cleaned_field_name = cleanser::clean(&field.name);
 
         tx.execute(&insert_notetype_field_stmt, &[
             &id,
             &cleaned_field_description,
             &field.font,
-            &field.name,
+            &cleaned_field_name,
             &field.ord,
             &field.rtl,
             &field.size,
@@ -355,6 +333,7 @@ pub async fn unpack_notetype(client: &mut SharedConn, notetype: &Notetype, deck:
 
     for (i, template) in notetype.tmpls.iter().enumerate().map(|(i, template)| (i as u32, template)) {
         let anki_id = template.id.unwrap_or(0);
+        let cleaned_tmpl_name = cleanser::clean(&template.name);
 
         tx.execute(&insert_notetype_template_stmt, &[
             &id,
@@ -364,7 +343,7 @@ pub async fn unpack_notetype(client: &mut SharedConn, notetype: &Notetype, deck:
             &template.bafmt,
             &template.bfont,
             &template.bsize,
-            &template.name,
+            &cleaned_tmpl_name,
             &i,
             &anki_id,
             &template.ord,

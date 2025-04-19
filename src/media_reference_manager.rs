@@ -9,7 +9,7 @@ use tokio_postgres::Error as PgError;
 type SharedConn = PooledConnection<'static, PostgresConnectionManager<tokio_postgres::NoTls>>;
 
 /// Extract all media references from a field content string as anki does
-pub fn extract_media_references(field_content: &str) -> HashSet<String> {
+#[must_use] pub fn extract_media_references(field_content: &str) -> HashSet<String> {
     let mut references = HashSet::new();
     
     // Sound references [sound:filename.mp3]

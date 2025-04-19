@@ -3,8 +3,6 @@ use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Duration, Utc};
 use rand::distr::{Alphanumeric, SampleString};
 use sha2::{Sha256, Digest};
-use hex;
-use std::env;
 use chrono::serde::ts_seconds;
 
 use crate::database;
@@ -54,7 +52,7 @@ pub async fn login(db_state: &Arc<database::AppState>, form: &Login) -> Result<A
     let client = match db_state.db_pool.get_owned().await {
         Ok(pool) => pool,
         Err(err) => {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             return Err("Internal Error".into());
         },
     };
@@ -74,7 +72,7 @@ pub async fn login(db_state: &Arc<database::AppState>, form: &Login) -> Result<A
     if verify_password(&form.password, &password_hash)? {
         // Generate new tokens
         let auth_response = generate_tokens(&client, user_id).await
-            .map_err(|e| format!("Error generating tokens: {}", e))?;
+            .map_err(|e| format!("Error generating tokens: {e}"))?;
         
         Ok(auth_response)
     } else {
@@ -84,7 +82,7 @@ pub async fn login(db_state: &Arc<database::AppState>, form: &Login) -> Result<A
 
 fn verify_password(password: &str, hash: &str) -> Result<bool, String> {
     argon2::verify_encoded(hash, password.as_bytes())
-        .map_err(|e| format!("Password verification error: {}", e))
+        .map_err(|e| format!("Password verification error: {e}"))
 }
 
 // Generate new tokens for a user
@@ -133,7 +131,7 @@ pub async fn refresh_token(db_state: &Arc<database::AppState>, refresh_req: &Tok
     let client = match db_state.db_pool.get_owned().await {
         Ok(pool) => pool,
         Err(err) => {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             return Err("Internal Error".into());
         },
     };
@@ -147,7 +145,7 @@ pub async fn refresh_token(db_state: &Arc<database::AppState>, refresh_req: &Tok
          WHERE refresh_token_hash = $1 
          AND refresh_expires_at > NOW()",
         &[&refresh_token_hash]
-    ).await.map_err(|e| format!("Database error: {}", e))?;
+    ).await.map_err(|e| format!("Database error: {e}"))?;
     
     // If found, generate new tokens
     match row {
@@ -156,7 +154,7 @@ pub async fn refresh_token(db_state: &Arc<database::AppState>, refresh_req: &Tok
             
             // Generate new tokens
             let auth_response = generate_tokens(&client, user_id).await
-                .map_err(|e| format!("Error generating tokens: {}", e))?;
+                .map_err(|e| format!("Error generating tokens: {e}"))?;
             
             Ok(auth_response)
         },
@@ -164,11 +162,11 @@ pub async fn refresh_token(db_state: &Arc<database::AppState>, refresh_req: &Tok
     }
 }
 
-pub async fn remove_token(db_state: &Arc<database::AppState>, token: &String) -> std::result::Result<String, Box<dyn std::error::Error>> {
+pub async fn remove_token(db_state: &Arc<database::AppState>, token: &str) -> std::result::Result<String, Box<dyn std::error::Error>> {
     let client = match db_state.db_pool.get().await {
         Ok(pool) => pool,
         Err(err) => {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             return Err("Internal Error".into());
         },
     };
@@ -189,7 +187,7 @@ pub async fn remove_token(db_state: &Arc<database::AppState>, token: &String) ->
 }
 
 // Get user ID from an access token
-pub async fn get_user_from_token(db_state: &Arc<database::AppState>, token: &String) -> Result<i32, Box<dyn std::error::Error>> {
+pub async fn get_user_from_token(db_state: &Arc<database::AppState>, token: &str) -> Result<i32, Box<dyn std::error::Error>> {
     if token.is_empty() {
         return Err("Token not provided".into());
     }
@@ -197,7 +195,7 @@ pub async fn get_user_from_token(db_state: &Arc<database::AppState>, token: &Str
     let client = match db_state.db_pool.get().await {
         Ok(pool) => pool,
         Err(err) => {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             return Err("Internal Error".into());
         },
     };
@@ -223,11 +221,11 @@ pub async fn get_user_from_token(db_state: &Arc<database::AppState>, token: &Str
 }
 
 // Check if user has permission for a specific deck
-pub async fn is_valid_user_token(db_state: &Arc<database::AppState>, token: &String, deck: &String) -> Result<bool, Box<dyn std::error::Error>> {
+pub async fn is_valid_user_token(db_state: &Arc<database::AppState>, token: &str, deck: &String) -> Result<bool, Box<dyn std::error::Error>> {
     let client = match db_state.db_pool.get().await {
         Ok(pool) => pool,
         Err(err) => {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             return Err("Internal Error".into());
         },
     };
@@ -267,7 +265,7 @@ pub async fn is_valid_user_token(db_state: &Arc<database::AppState>, token: &Str
 }
 
 // Simple check if a token is valid
-pub async fn is_authenticated(db_state: &Arc<database::AppState>, token: &String) -> bool {
+pub async fn is_authenticated(db_state: &Arc<database::AppState>, token: &str) -> bool {
     match get_user_from_token(db_state, token).await {
         Ok(user_id) => user_id > 0,
         Err(_) => false
@@ -279,7 +277,7 @@ pub async fn cleanup_expired_tokens(db_state: &Arc<database::AppState>) -> Resul
     let client = match db_state.db_pool.get().await {
         Ok(pool) => pool,
         Err(err) => {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             return Err("Internal Error".into());
         },
     };

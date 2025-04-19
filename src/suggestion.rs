@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use crate::database;
 use crate::media_reference_manager::update_media_references_for_note;
 use crate::push;
-use crate::structs::*;
-use crate::notetypes::*;
+use crate::structs::{AnkiDeck, Note};
+use crate::notetypes::does_notetype_exist;
 use crate::cleanser;
 
 use async_recursion::async_recursion;
@@ -267,7 +267,7 @@ pub async fn overwrite_note(
     // force tag changes
     force_overwrite_tag(client, n_id, &note.tags, req_ip, commit, true).await?;
 
-    Ok(format!("Updating the existing card {:?} with the new information!", n_id))
+    Ok(format!("Updating the existing card {n_id:?} with the new information!"))
 }
 
 pub async fn update_note(
@@ -280,12 +280,11 @@ pub async fn update_note(
     old_deck_id: i64,
 ) -> std::result::Result<String, Box<dyn std::error::Error>> {    
     let n_r_q = client.query("SELECT reviewed FROM notes where id = $1 and deleted = false", &[&n_id],).await?;
-    let mut note_reviewed = false;
-    if n_r_q.is_empty() { 
+    let note_reviewed = if n_r_q.is_empty() { 
         return Err("note not found or deleted".into()); // Because its been marked as deleted
     } else {
-        note_reviewed = n_r_q[0].get(0);
-    }
+        n_r_q[0].get(0)
+    };
 
     let tx = client.transaction().await?;
 
@@ -342,12 +341,11 @@ pub async fn update_note(
     } else {// force tag changes, if the note is unreviewed but keep the old commit id so all changes are kept in the same commit        
         // Gamble that there is only one commit per unreviewed note. should be the case beecause who other than the creator would change it?
         let get_old_commit = client.query("SELECT commit FROM tags WHERE note = $1 AND reviewed = false ORDER BY commit ASC LIMIT 1", &[&n_id],).await?;
-        let mut old_commit_id = 0;
-        if get_old_commit.is_empty() { 
-            old_commit_id = commit; // No idea how this could happen, so we just use the current one as a fallback
+        let old_commit_id = if get_old_commit.is_empty() { 
+            commit // No idea how this could happen, so we just use the current one as a fallback
         } else {
-            old_commit_id = get_old_commit[0].get(0);
-        }
+            get_old_commit[0].get(0)
+        };
         force_overwrite_tag(client, n_id, &note.tags, req_ip, old_commit_id, false).await?;
     }
 
@@ -368,14 +366,14 @@ pub async fn update_note(
         }       
     }
     
-    Ok(format!("Suggested the new information to the existing card {:?}", n_id))
+    Ok(format!("Suggested the new information to the existing card {n_id:?}"))
 }
 
 async fn get_original_name(db_state: &Arc<database::AppState>, input_hash: &str) -> Result<String, Box<dyn std::error::Error>> {
     let client = match db_state.db_pool.get().await {
         Ok(pool) => pool,
         Err(err) => {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             return Err("Failed to retrieve a pooled connection".into());
         },
     };
@@ -472,7 +470,7 @@ pub async fn create_new_commit(db_state: &Arc<database::AppState>, rationale: i3
     let client = match db_state.db_pool.get().await {
         Ok(pool) => pool,
         Err(err) => {
-            println!("Error getting pool: {}", err);
+            println!("Error getting pool: {err}");
             return Err("Failed to retrieve a pooled connection".into());
         },
     };
@@ -509,7 +507,7 @@ pub async fn sanity_check_notetypes(
                 return Err(n.crowdanki_uuid.clone().into());
             }
 
-            cache.insert(n.crowdanki_uuid.to_owned(), guid.to_owned());
+            cache.insert(n.crowdanki_uuid.clone(), guid.clone());
         }
     }
 
@@ -591,7 +589,7 @@ pub async fn make(
     } else {
         match try_suggest_note(client, deck_hash, notetype_cache, deck_path, deck_id, deck, req_ip, commit, force_overwrite, deck_tree).await {
             Ok(_res) => { },
-            Err(error) => { println!("Error Submit Note: {}", error) },
+            Err(error) => { println!("Error Submit Note: {error}") },
         }; // Big Problem: Issues go unnoticed by the user.
     }
 

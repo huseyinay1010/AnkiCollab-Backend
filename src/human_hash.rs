@@ -1,7 +1,7 @@
 //! Generate human readable digests for UUIDs
 //!
-//! Based on https://github.com/zacharyvoase/humanhash
-//! Credits to https://github.com/jamesmunns/human-hash-rs
+//! Based on <https://github.com/zacharyvoase/humanhash>
+//! Credits to <https://github.com/jamesmunns/human-hash-rs>
 //! I made the wordlist tho ;)
 //! Should be compatible
 
@@ -63,13 +63,13 @@ pub const DEFAULT_WORDLIST: Wordlist = &[
 /// Human Hasher
 impl HumanHasher {
     /// Create a new hasher with a custom wordlist
-    pub fn new(words: Wordlist) -> HumanHasher {
-        HumanHasher { words }
+    #[must_use] pub const fn new(words: Wordlist) -> Self {
+        Self { words }
     }
 
     /// Create a human readable digest for a UUID. Makes the collision space worse,
     /// reducing it to 1:(2^(8*`words_out`)-1).
-    pub fn humanize(&self, uuid: &Uuid, words_out: usize) -> String {
+    #[must_use] pub fn humanize(&self, uuid: &Uuid, words_out: usize) -> String {
         compress(uuid.as_bytes(), words_out)
             .iter()
             .map(|&x| self.words[x as usize].to_string())
@@ -81,7 +81,7 @@ impl HumanHasher {
 /// Break a slice of u8s into (at least) `target` `u8`s.
 ///
 /// WARNING: If the slice is not evenly divisible, there will be one extra u8
-/// from the remainder. output `u8`s are created by XORing the input bytes.
+/// from the remainder. output `u8`s are created by `XORing` the input bytes.
 fn compress(bytes: &[u8], target: usize) -> Vec<u8> {
     let seg_size = bytes.len() / target;
     bytes.chunks(seg_size)
@@ -91,7 +91,7 @@ fn compress(bytes: &[u8], target: usize) -> Vec<u8> {
 
 /// Create a human readable digest for a UUID. Makes the collision space worse,
 /// reducing it to 1:(2^(8*`words_out`)-1).
-pub fn humanize(uuid: &Uuid, words_out: usize) -> String {
+#[must_use] pub fn humanize(uuid: &Uuid, words_out: usize) -> String {
     DEFAULT_HUMANIZER.humanize(uuid, words_out)
 }
 
