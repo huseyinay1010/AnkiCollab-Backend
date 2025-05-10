@@ -1183,6 +1183,8 @@ fn determine_content_type_by_name(file_name: &str) -> Option<String> {
         "svg" => Some("image/svg+xml".to_string()),
         "bmp" => Some("image/bmp".to_string()),
         "tif" | "tiff" => Some("image/tiff".to_string()),
+        "mp3" => Some("audio/mpeg".to_string()),
+        "ogg" => Some("audio/ogg".to_string()),
         _ => None,
     }
 }
@@ -1201,6 +1203,12 @@ fn determine_content_type(bytes: &[u8]) -> Option<String> {
         }
         [0x3C, 0x73, 0x76, 0x67] | [0x3C, 0x3F, 0x78, 0x6D] => Some("image/svg+xml".to_string()),
         [0x42, 0x4D, _, _] => Some("image/bmp".to_string()),
+        [0x49, 0x49, 0x2A, 0x00] | [0x4D, 0x4D, 0x00, 0x2A] => Some("image/tiff".to_string()),        
+        [0x4F, 0x67, 0x67, 0x53] => Some("audio/ogg".to_string()),
+        //mp3
+        [0xFF, 0xFB, _, _] | [0xFF, 0xF3, _, _] |[0xFF, 0xF2, _, _] | [0x49, 0x44, 0x33, _] => Some("audio/mpeg".to_string()),
+
+
         _ => None,
     }
 }
@@ -1216,6 +1224,12 @@ fn is_valid_media_file(bytes: &[u8]) -> bool {
     const BMP_MARKER: [u8; 2] = [0x42, 0x4D]; // "BM"
     const TIFF_LE_SIGNATURE: [u8; 4] = [0x49, 0x49, 0x2A, 0x00]; // "II*\0"
     const TIFF_BE_SIGNATURE: [u8; 4] = [0x4D, 0x4D, 0x00, 0x2A]; // "MM\0*"
+    const MP3_SIGNATURE0: [u8; 3] = [0x49, 0x44, 0x33]; // ID3v2 tag
+    const MP3_SIGNATURE1: [u8; 2] = [0xFF, 0xFB]; // MPEG-1 Layer 3 file without an ID3 tag or with an ID3v1 tag (which is appended at the end of the file)
+    const MP3_SIGNATURE2: [u8; 2] = [0xFF, 0xF3]; // MPEG-1 Layer 3 file without an ID3 tag or with an ID3v1 tag (which is appended at the end of the file)
+    const MP3_SIGNATURE3: [u8; 2] = [0xFF, 0xF2]; // MPEG-1 Layer 3 file without an ID3 tag or with an ID3v1 tag (which is appended at the end of the file)
+    const OGG_SIGNATURE: [u8; 4] = [0x4F, 0x67, 0x67, 0x53]; // OggS
+    
     
     // Minimum bytes needed for signature validation
     if bytes.len() < 8 {
@@ -1249,6 +1263,15 @@ fn is_valid_media_file(bytes: &[u8]) -> bool {
     
     // TIFF validation
     if bytes.len() >= 4 && (bytes[0..4] == TIFF_LE_SIGNATURE || bytes[0..4] == TIFF_BE_SIGNATURE) {
+        return true;
+    }
+
+    // MP3 validation
+    if bytes.len() >= 3 && (bytes[0..3] == MP3_SIGNATURE0 || bytes[0..2] == MP3_SIGNATURE1 || bytes[0..2] == MP3_SIGNATURE2 || bytes[0..2] == MP3_SIGNATURE3)  {
+        return true;
+    }
+    // OGG validation
+    if bytes.len() >= 4 && bytes[0..4] == OGG_SIGNATURE {
         return true;
     }
     
@@ -1296,8 +1319,8 @@ fn is_allowed_extension(filename: &str) -> bool {
         None => return false,
     };
 
-    const ALLOWED_EXTENSIONS: [&str; 9] = [
-        "jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "tif", "tiff"
+    const ALLOWED_EXTENSIONS: [&str; 11] = [
+        "jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "tif", "tiff", "mp3", "ogg",
     ];
 
     ALLOWED_EXTENSIONS.contains(&ext.as_str())
