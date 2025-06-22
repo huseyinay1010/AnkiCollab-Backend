@@ -86,7 +86,7 @@ static STYLE_REGEX: Lazy<Regex> = Lazy::new(|| {
 /// The ammonia builder, allowing the "style" attribute.
 static CLEANSER: Lazy<Builder<'static>> = Lazy::new(|| {
     let mut builder = Builder::default();
-    builder.add_generic_attributes(&["style", "class"]);
+    builder.add_generic_attributes(&["style", "class", "data-src"]);
     builder
 });
 

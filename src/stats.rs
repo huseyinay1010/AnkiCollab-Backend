@@ -15,11 +15,14 @@ pub async fn new(db_state: &Arc<database::AppState>, info: StatsInfo) -> Result<
     // Check if the deck exists
     let deck_id_rows = client.query("SELECT id FROM decks WHERE human_hash = $1", &[&info.deck_hash]).await?;
     if deck_id_rows.len() != 1 {
+        println!("Expected one deck with hash {}, found {}", info.deck_hash, deck_id_rows.len());
         return Err(format!("Expected one deck with hash {}, found {}", info.deck_hash, deck_id_rows.len()).into());
     }
     let deck_id: i64 = deck_id_rows[0].get(0);
 
-    let deck_ids: Vec<i64> = client
+    let tx = client.transaction().await?;
+
+    let deck_ids: Vec<i64> = tx
         .query(
             "
                 WITH RECURSIVE input_deck_cte AS (
@@ -39,7 +42,10 @@ pub async fn new(db_state: &Arc<database::AppState>, info: StatsInfo) -> Result<
         .map(|row| row.get(0))
         .collect();
     
-    let tx = client.transaction().await?;
+    if deck_ids.is_empty() {
+        println!("No decks found for deck_id {}", deck_id);
+        return Err(format!("No decks found for deck_id {}", deck_id).into());
+    }
 
     let note_id_stmt = tx.prepare("SELECT id FROM notes WHERE guid = $1 AND deleted = false AND deck = ANY($2)").await?;
     let execute_stmt = tx.prepare(
@@ -52,6 +58,7 @@ pub async fn new(db_state: &Arc<database::AppState>, info: StatsInfo) -> Result<
             let note_id_rows = tx.query(&note_id_stmt, &[&guid, &deck_ids]).await?;
             if note_id_rows.len() != 1 {
                 // Skip invalid notes. User may have added a note to a deck that is not in the database.
+                println!("[Deck Stat Insert Error] Expected one note with guid {}, found {}", guid, note_id_rows.len());
                 continue;
             }
             let note_id: i64 = note_id_rows[0].get(0);

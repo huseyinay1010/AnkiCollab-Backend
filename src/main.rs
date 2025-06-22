@@ -365,8 +365,8 @@ pub async fn process_card(
     match suggestion::make(&mut client, &info.remote_deck, &mut notetype_cache, &deck_path, &anki_deck, &ip, commit_id, force_overwrite, deck_id, owner, &deck_tree).await {
         Ok(_res) => (StatusCode::OK, "Success".to_string()),
         Err(error) => { 
-            println!("Error occurred in make suggestion: {error}"); 
-            (StatusCode::INTERNAL_SERVER_ERROR, r#"{ "status": 0, "message": "Error submitting your suggestion" }"#.to_string())
+            println!("Error occurred in make suggestion: {error}");
+            (StatusCode::UNPROCESSABLE_ENTITY, error.to_string())
         },
     }
 }
@@ -508,7 +508,7 @@ pub async fn refresh_auth_token(
         },
         Err(error) => {
             println!("Error occurred: {error}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "Error".to_string())
+            (StatusCode::UNAUTHORIZED, "Error".to_string())
         },
     }
 }
@@ -546,7 +546,8 @@ fn media_routes() -> Router<Arc<AppState>> {
         .route("/check/bulk", post(media_manager::check_media_bulk))
         .route("/confirm/bulk", post(confirm_media_bulk_async))
         .route("/manifest", post(media_manager::get_media_manifest))
-        .route("/sanitize/svg", post(media_manager::sanitize_svg_batch))        
+        .route("/sanitize/svg", post(media_manager::sanitize_svg_batch))
+        .route("/missing/{deck_hash}", get(get_all_deck_missing_media)) 
         // strict rate limiting
         .layer(GovernorLayer {
             config: media_governor_conf,
@@ -575,6 +576,24 @@ async fn get_bucket_size(s3_client: &S3Client, bucket: &str) -> i64 {
     println!("Total bucket size in GB: {} GB", total_bytes / 1024 / 1024 / 1024);
 
     total_bytes
+}
+
+async fn get_all_deck_missing_media(
+    State(state): State<Arc<AppState>>,
+    Path(deck_hash): Path<String>,
+) -> impl IntoResponse {
+    let client: database::SharedConn = match state.db_pool.get_owned().await {
+        Ok(pool) => pool,
+        Err(err) => {
+            println!("Error getting pool: {err}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "[]".to_string());
+        },
+    };
+    let media_files = media_reference_manager::get_missing_media(&client, &deck_hash).await 
+        .unwrap_or_else(|_| vec![]);
+
+    let json = serde_json::to_string(&media_files).unwrap();
+    (StatusCode::OK, json)
 }
 
 

@@ -587,10 +587,11 @@ pub async fn make(
     if owner != 0 {
         push::unpack_deck_json(client, deck, notetype_cache, owner, req_ip, deck_id, force_overwrite, commit, deck_tree).await?;
     } else {
-        match try_suggest_note(client, deck_hash, notetype_cache, deck_path, deck_id, deck, req_ip, commit, force_overwrite, deck_tree).await {
-            Ok(_res) => { },
-            Err(error) => { println!("Error Submit Note: {error}") },
-        }; // Big Problem: Issues go unnoticed by the user.
+        // match try_suggest_note(client, deck_hash, notetype_cache, deck_path, deck_id, deck, req_ip, commit, force_overwrite, deck_tree).await {
+        //     Ok(_res) => { },
+        //     Err(error) => { println!("Error Submit Note: {error}") },
+        // }; // Big Problem: Issues go unnoticed by the user.
+        try_suggest_note(client, deck_hash, notetype_cache, deck_path, deck_id, deck, req_ip, commit, force_overwrite, deck_tree).await?;
     }
 
     Ok("Success".into())

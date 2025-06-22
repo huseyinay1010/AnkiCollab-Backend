@@ -180,7 +180,7 @@ pub async fn remove_token(db_state: &Arc<database::AppState>, token: &str) -> st
     ).await?;
     
     if result == 0 {
-        return Err("Token not found".into());
+        return Ok("Token not found".into());
     }
     
     Ok("Token successfully removed".into())

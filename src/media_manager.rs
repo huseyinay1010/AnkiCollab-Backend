@@ -11,7 +11,6 @@ use axum_client_ip::SecureClientIp;
 use base64::Engine;
 use chrono::{Duration, Utc};
 use std::sync::Arc;
-use tokio_postgres::{Client, Error as PgError};
 use tokio::time;
 use uuid::Uuid;
 
@@ -36,79 +35,6 @@ lazy_static! {
 
 const PRESIGNED_URL_EXPIRATION: u64 = 15; // minutes
 const SIGNATURE_CHECK_BYTES: usize = 128; // Maximum bytes needed for file signature validation
-
-// Initialize media tables in database
-pub async fn init_media_tables(db: &Client) -> std::result::Result<(), PgError> {
-    db.batch_execute(
-        "
-        CREATE TABLE IF NOT EXISTS media_files (
-            id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
-            hash VARCHAR(64) NOT NULL UNIQUE,
-            file_size BIGINT NOT NULL DEFAULT 0,  -- Add file size column
-            created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-        );
-
-        CREATE TABLE IF NOT EXISTS media_references (
-            id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
-            media_id BIGINT NOT NULL REFERENCES media_files(id) ON DELETE CASCADE,
-            note_id BIGINT REFERENCES notes(id) ON DELETE CASCADE,
-            file_name VARCHAR(255) NOT NULL,
-            UNIQUE(media_id, note_id)
-        );
-
-        -- Bulk upload metadata
-        CREATE TABLE IF NOT EXISTS media_bulk_uploads (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            metadata JSONB NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-
-        CREATE TABLE IF NOT EXISTS media_operations_log (
-            id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
-            operation_type INTEGER NOT NULL,
-            user_id INTEGER,
-            ip_address VARCHAR(45) NOT NULL,
-            timestamp TIMESTAMPTZ NOT NULL,
-            file_hash VARCHAR(64),
-            file_name VARCHAR(255),
-            file_size BIGINT,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
-        );
-
-        CREATE TABLE user_quotas (
-            user_id INTEGER NOT NULL PRIMARY KEY,
-            storage_used BIGINT NOT NULL DEFAULT 0,
-            upload_count INTEGER NOT NULL DEFAULT 0,
-            download_count INTEGER NOT NULL DEFAULT 0,
-            last_reset TIMESTAMP WITH TIME ZONE NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        );
-
-        CREATE INDEX IF NOT EXISTS media_files_hash_idx ON media_files(hash);
-        CREATE INDEX IF NOT EXISTS media_references_note_id_idx ON media_references(note_id);
-        CREATE INDEX IF NOT EXISTS media_references_media_idx ON media_references(media_id);
-        CREATE INDEX IF NOT EXISTS media_references_file_name_idx ON media_references(file_name);
-        CREATE INDEX IF NOT EXISTS notes_guid_idx ON notes(guid);
-
-        DROP TABLE auth_tokens;
-        CREATE TABLE auth_tokens (
-            id INT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
-            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            token_hash BYTEA NOT NULL,
-            refresh_token_hash BYTEA,
-            expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-            refresh_expires_at TIMESTAMP WITH TIME ZONE,
-            created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-            last_used_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-        );
-
-        CREATE UNIQUE INDEX idx_auth_tokens_user_id ON auth_tokens(user_id);
-        CREATE INDEX idx_auth_tokens_token_hash ON auth_tokens(token_hash);
-        CREATE INDEX idx_auth_tokens_refresh_token_hash ON auth_tokens(refresh_token_hash);
-        CREATE INDEX idx_auth_tokens_expires_at ON auth_tokens(expires_at);        
-        "
-    ).await
-}
 
 // Get all objects from s3, see which ones aren't references in the media table (should be impossible to have this happen, but just in case) and remove them.
 pub async fn cleanup_orphaned_media_s3(
@@ -624,19 +550,19 @@ pub async fn check_media_bulk(
         } else {
             let note_id = if let Some(nid) = note_id_map.get(&file.note_guid) { nid } else {
                 invalid_hash_set.insert(file.hash.clone());
-                //println!("Note ID not found for file: {}", file.filename);
+                println!("Note ID not found for file: {}", file.filename);
                 continue; // Skip if note ID is not found
             };
 
             if file.file_size <= 0 || file.file_size > MAX_FILE_SIZE_BYTES as i64 {
                 invalid_hash_set.insert(file.hash.clone());
-                //println!("Invalid file size for file: {}", file.filename);
+                println!("Invalid file size for file: {}", file.filename);
                 continue; // Skip if file size is invalid
             }        
 
             let file_content_type = if let Some(content_type) = determine_content_type_by_name(&file.filename) { content_type } else {
                 invalid_hash_set.insert(file.hash.clone());
-                //println!("Invalid file content type for file: {}", file.filename);
+                println!("Invalid file content type for file: {}", file.filename);
                 continue; // Skip if content type is invalid
             };
 
@@ -1343,7 +1269,7 @@ pub async fn get_media_manifest(
         return Err((StatusCode::BAD_REQUEST, "No filenames provided".to_string()));
     }
 
-    if req.filenames.len() > 500 {
+    if req.filenames.len() > 500 { // Contabo api limit is 250 requests per second, so we should probably reduce this limit
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
             "Too many files requested.".to_string()
