@@ -1,15 +1,17 @@
-# Nutze die neueste stabile Rust-Version
-FROM rust:1.85-slim
+# Wir verwenden das neueste Rust-Image, das die benötigte Edition2024-Funktion unterstützt.
+FROM rust:1.85-bookworm-slim
 
 # Setze das Arbeitsverzeichnis im Container
 WORKDIR /app
 
-# Kopiere alle Projektdateien in den Container
+# Kopiere alle Projektdaten in den Container
 COPY . .
 
-# Führe den Build-Befehl aus, um dein Projekt zu kompilieren
-# Ersetze "your-project-name" mit dem Namen deines Projekts
+# Führe den Build aus, um die Anwendung zu kompilieren
+# Mit der --release Flagge wird die Binärdatei optimiert.
 RUN cargo build --release
 
-# Setze den Befehl, der beim Start des Containers ausgeführt wird
-CMD ["./target/release/your-project-name"]
+# Setze den Befehl, der beim Start des Containers ausgeführt wird.
+# Ersetze den Platzhalter 'your_binary_name' mit dem Namen der ausführbaren Datei deines Projekts.
+# Der Name ist normalerweise der gleiche wie der in deiner Cargo.toml.
+CMD ["./target/release/AnkiCollab-Backend"]
