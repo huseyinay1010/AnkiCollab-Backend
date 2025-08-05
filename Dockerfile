@@ -1,26 +1,15 @@
-# Multi-Stage Build: Starte mit einem neueren Rust-Image
-FROM rust:1.85 AS builder
+# Nutze die neueste stabile Rust-Version
+FROM rust:1.85-slim
 
-# Kopiere die Cargo-Manifeste, um die Abhängigkeiten zu cachen
+# Setze das Arbeitsverzeichnis im Container
 WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
 
-# Installiere die Abhängigkeiten
-RUN cargo build --release
-
-# Kopiere den Rest des Codes
+# Kopiere alle Projektdateien in den Container
 COPY . .
 
-# Erstelle den Release-Build
+# Führe den Build-Befehl aus, um dein Projekt zu kompilieren
+# Ersetze "your-project-name" mit dem Namen deines Projekts
 RUN cargo build --release
 
-# Finales, schlankes Image erstellen
-FROM debian:stable-slim
-# Lege hier den User oder die Umgebungsvariablen fest
-WORKDIR /app
-
-# Kopiere die fertige Binärdatei aus dem Builder-Image
-COPY --from=builder /app/target/release/anki-collab-backend /usr/local/bin/anki-collab-backend
-
-# Befehl zum Starten der Anwendung
-CMD ["/usr/local/bin/anki-collab-backend"]
+# Setze den Befehl, der beim Start des Containers ausgeführt wird
+CMD ["./target/release/your-project-name"]
